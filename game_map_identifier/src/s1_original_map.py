@@ -1,6 +1,7 @@
 """Project actual source pixels at their native resolution in one resampling."""
 import json
 from collections import OrderedDict
+from threading import RLock
 import cv2
 import numpy as np
 from .s1_catalog import read_image
@@ -13,8 +14,12 @@ class OriginalMap:
         registration = self.catalog.root.parent.parent / 'config' / 's1_hd_registration.json'
         self.hd_to_template = json.loads(registration.read_text(encoding='utf-8'))
         self.recent = OrderedDict()
+        self.lock=RLock()
 
     def source(self, floor):
+        with self.lock:return self._source(floor)
+
+    def _source(self,floor):
         key = floor['id']
         if key in self.recent:
             self.recent.move_to_end(key)

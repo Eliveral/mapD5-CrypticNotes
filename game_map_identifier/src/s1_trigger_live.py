@@ -102,6 +102,11 @@ class LiveController(base.LiveController):
         revision = self.session_revision
         manual = self.roi is not None
         burst = time.monotonic() < self.burst_until
+        last=self.view_cache
+        if (manual or not self.valid_visit(last,dict(game=game,roi=roi),300)
+                or not last.get('selected_floor')):last=None
+        layout=self.app.layout_limit.get();floor_limit=self.app.floor_limit.get()
+        style='structure' if self.app.overlay_style.get()=='结构' else 'original_clean'
         self.sampling = True
 
         def grab():
@@ -114,13 +119,40 @@ class LiveController(base.LiveController):
                     self.events.put(('sample_discard', None)); return
                 presence = (dict(visible=True, manual_crop=True) if manual else
                             self.visibility.inspect(frame, fast=burst))
-                sig = signature(frame) if presence['visible'] else None
-                floor = selected_floor(frame) if presence['visible'] and not manual else None
+                floor = selected_floor(frame) if not manual else None
+                scores=presence.get('scores',{})
+                # A single weak HUD button is common during map animations.
+                # Only bridge a recently confirmed, still-selected map. A close
+                # shortcut invalidates display and two missing controls close immediately.
+                if (not presence['visible'] and self.display and floor and
+                        max(scores.values(),default=0)>.52 and time.monotonic()-getattr(self,'last_strong_map',0)<.20):
+                    presence=dict(presence,visible=True,bridged=True)
+                positive_at=time.monotonic()
                 stationary = bool(probe and presence['visible'] and probe.stationary(frame, opacity))
-                self.events.put(('sample', dict(epoch=epoch, game=game, roi=roi, frame=frame,
-                    presence=presence, signature=sig, selected_floor=floor, probing=probe is not None,
-                    stationary=stationary, at=time.monotonic(), manual=manual, revision=revision,
-                    capture_ms=round((time.monotonic()-began)*1000, 1))))
+                changing=bool(shown and floor!=shown.get('selected_floor'))
+                if presence['visible'] and probe and (changing or not stationary):
+                    frame=probe.uncovered_frame(frame)
+                sig=signature(frame) if presence['visible'] else None
+                sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
+                    signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,
+                    at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
+                if stationary and last and floor==last['selected_floor'] and not changing:
+                    point=self.matcher.handoffs.player_position(frame,last['floor'],last['matrix'])
+                    sample['player_update']=(last,point)
+                origin=last
+                if last and floor!=last['selected_floor'] and last.get('provisional'):origin=None
+                if last and floor==last['selected_floor']:
+                    moving=not stationary if probe else not same_view(sig,last['signature'])
+                    origin=last.get('handoff_origin') if moving or last.get('provisional') else None
+                if (presence['visible'] and origin and floor and self.valid_visit(origin,sample,300) and
+                        floor!=origin['selected_floor'] and floor_limit in ('自动',floor)
+                        and layout in ('自动',origin['floor']['layout_id'][3:]) and not self.warming):
+                    result=self.matcher.handoff(frame,origin,floor)
+                    if result:
+                        pixels=self.matcher.render_live(result,frame,style)
+                        result['layer_probe']=LayerProbe(frame,pixels,sig,result.get('label_tiles',()))
+                        sample['handoff']=(result,pixels,style,time.monotonic()-positive_at)
+                self.events.put(('sample',sample))
             except Exception as exc:
                 self.events.put(('sample_error', str(exc)))
         if not getattr(self,'capture_worker',None):
@@ -143,6 +175,20 @@ class LiveController(base.LiveController):
             self.due = 0
             return
         previous = self.latest
+        now=time.monotonic()
+        if sample.get('player_update'):
+            visit,point=sample['player_update']
+            if visit is self.view_cache:
+                visit['player_hd']=point
+                visit['at']=sample['at']
+        if sample['presence']['visible'] and not sample.get('manual') and not sample.get('selected_floor') and self.display and self.display.get('selected_floor'):
+            since=self.display.setdefault('uncertain_floor_since',now)
+            if now-since<.16:
+                self.due=now+.012
+                return
+        elif self.display:self.display.pop('uncertain_floor_since',None)
+        if sample['presence']['visible'] and not sample['presence'].get('bridged'):
+            self.last_strong_map=sample['at']
         if sample['presence']['visible'] and (not previous or not previous['presence']['visible']
                 or previous.get('selected_floor')!=sample.get('selected_floor')):
             self.open_detected_at=sample['at']
@@ -151,7 +197,7 @@ class LiveController(base.LiveController):
             self.generation += 1
             sample['epoch'] = self.generation
             self.display = self.pending = None
-            if self.overlay and self.overlay._visible:
+            if self.overlay and self.overlay._visible and not sample.get('handoff'):
                 self.overlay.hide()
             self.note('floor_changed', f'切换楼层，正在重新定位 {sample.get("selected_floor") or "…"}',
                       selected_floor=sample.get('selected_floor'))
@@ -172,39 +218,38 @@ class LiveController(base.LiveController):
             self.note('map_closed', '等待地图键；已关闭的地图不会补显示迟到覆盖。',
                       capture_ms=sample['capture_ms'], presence=sample['presence'])
             return
+        if sample.get('handoff'):
+            self.pending=None
+            self.accept_match((sample,*sample['handoff']))
+            return
         if sample.get('probing'):
-            # This frame may contain our own artwork. Never match it, save it
-            # as a raw map sample, or let it authorize a pending registration.
-            sample['signature'] = None
             if self.display and self.display.get('selected_floor') == sample.get('selected_floor'):
-                if sample['stationary']:
-                    self.display['misses'] = 0
+                if sample['stationary'] and not self.display.get('provisional'):
+                    self.display.pop('unsteady_since',None)
+                    if not self.display.get('uploaded'):self.show_display()
                     self.due = now+.06
                     return
-                self.display['misses'] = self.display.get('misses',0)+1
-                if self.display['misses'] < 2:
-                    self.due = now+.012
-                    return
-            if self.overlay._visible: self.overlay.hide()
-            self.display = self.pending = None
-            self.due = 0
-            return
-        if self.display and same_view(sample['signature'], self.display['signature']):
+            # Registration only sees screen pixels the old layer did not paint.
+            # Keep the window up and swap pixels once the next pose is ready.
+            if self.display:self.display.setdefault('unsteady_since',now)
+        if not sample.get('probing') and self.display and not self.display.get('provisional') and same_view(sample['signature'], self.display['signature']):
             self.show_display()
             self.due = now+.06
-        elif self.reuse_view(sample):
+        elif not sample.get('probing') and self.reuse_view(sample):
             self.show_display()
             self.due = now+.06
         else:
-            if self.overlay and self.overlay._visible: self.overlay.hide()
-            self.display = None
+            if self.display and self.overlay and self.overlay._visible:
+                since=self.display.setdefault('unsteady_since',now)
+                if now-since>.4:
+                    self.overlay.hide();self.display=None
             self.pending = sample  # Bounded latest-positive slot, never an unbounded frame queue.
             self.start_match()
-        self.save_sample_async(sample)
+        if not sample.get('probing'):self.save_sample_async(sample)
 
     def reuse_view(self, sample):
         cached = self.floor_visits.get(sample.get('selected_floor'), self.view_cache)
-        if (not self.valid_visit(cached,sample,30) or
+        if (not self.valid_visit(cached,sample,30) or cached.get('provisional') or
                 sample.get('selected_floor') != cached.get('selected_floor') or
                 sample['game'] != cached['game'] or sample['roi'] != cached['roi'] or
                 not same_view(sample['signature'], cached['signature'])): return False
@@ -248,9 +293,9 @@ class LiveController(base.LiveController):
         cached = self.floor_cache if self.cache_identity == identity else None
         scale_hint = self.scale_hint if self.cache_identity == identity else None
         visited = self.floor_visits.get(sample.get('selected_floor'))
-        priors=[visited,self.view_cache,*sorted(self.floor_visits.values(),key=lambda v:-v['at'])]
+        priors=[self.view_cache,visited,*sorted(self.floor_visits.values(),key=lambda v:-v['at'])]
         visited=next((v for v in priors if self.valid_visit(v,sample,300)
-                      and v.get('unique_layout') and v.get('selected_floor')),None)
+                      and v.get('unique_layout') and not v.get('provisional') and v.get('selected_floor')),None)
         if cached and ((layout and layout != cached['layout_id']) or (floor and floor != cached['floor'])):
             cached = None
 
@@ -292,8 +337,11 @@ class LiveController(base.LiveController):
         threading.Thread(target=match, daemon=True).start()
 
     def match_received(self, payload):
-        sample, result, rendered, style, elapsed = payload
         self.matching = False
+        self.accept_match(payload)
+
+    def accept_match(self,payload):
+        sample, result, rendered, style, elapsed = payload
         game = sample['game']
         if (not self.active or self.suspended or self.hidden or not self.game or
                 sample.get('revision', self.session_revision) != self.session_revision or
@@ -303,21 +351,31 @@ class LiveController(base.LiveController):
                 sample.get('selected_floor') != self.latest.get('selected_floor')):
             self.start_match()
             return
+        if self.view_cache and self.view_cache.get('sample_at',0)>sample['at']:
+            self.start_match()
+            return
         if result['accepted']:
             alternatives=result.get('possible_layouts') or [result['floor']['layout_id']]
-            summary=f'负一共通区域 · {len(alternatives)} 套候选' if result.get('common_floors') else None
+            summary=f"{result['floor']['floor']} 共通区域 · {len(alternatives)} 套候选" if result.get('common_floors') else None
+            if result.get('passage'):summary=f"{result['floor']['floor']} · {result['passage']} · 继承定位"
             if (not self.valid_visit(self.view_cache,sample,300) or
                     self.view_cache['floor']['layout_id'] not in alternatives):
                 self.floor_visits.clear()
             self.floor_cache, self.cache_identity = result['floor'], (game.hwnd, game.pid)
             self.scale_hint = float(result.get('scale', np.linalg.norm(result['matrix'][0,:2])))
             probe = result.get('layer_probe') or LayerProbe(sample['frame'],rendered,sample['signature'])
-            self.view_cache = dict(at=time.monotonic(), game=game, roi=sample['roi'], revision=self.session_revision,
+            self.view_cache = dict(at=time.monotonic(), sample_at=sample['at'], game=game, roi=sample['roi'], revision=self.session_revision,
                                    selected_floor=sample.get('selected_floor'), label=result['floor']['id'],summary=summary,
                                    signature=sample['signature'], rendered=rendered, floor=result['floor'], probe=probe,
                                    matrix=np.array(result['matrix'],copy=True),
                                    unique_layout=len(alternatives)==1,
+                                   provisional=bool(result.get('provisional')),
+                                   handoff_origin=result.get('handoff_origin'),
+                                   alternatives=result.get('common_floors'),
                                    thumb=cv2.resize(sample['frame'], (320, 180)))
+            handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
+            if handoffs and not sample.get('manual'):
+                self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])
             if sample.get('selected_floor') == result['floor']['floor']:
                 self.floor_visits[sample['selected_floor']] = self.view_cache
             self.note('common_floor' if result.get('common_floors') else 'layout_learned', layout=result['floor']['id'], possible_layouts=alternatives, elapsed=elapsed,
@@ -326,11 +384,12 @@ class LiveController(base.LiveController):
             if (sample['epoch'] == self.generation and current and current['presence']['visible'] and
                     current['game'] == game and current['roi'] == sample['roi'] and
                     time.monotonic()-current['at'] < .30 and
-                    same_view(current['signature'], sample['signature']) and base.foreground() == game.hwnd):
+                    (current is sample or same_view(current['signature'], sample['signature'])) and base.foreground() == game.hwnd):
                 self.locked_match = result
                 self.display = dict(signature=sample['signature'], rendered=rendered, roi=sample['roi'],
                                     epoch=self.generation, game=game, selected_floor=sample.get('selected_floor'),
-                                    label=result['floor']['id'],summary=summary, probe=probe)
+                                    label=result['floor']['id'],summary=summary,provisional=result.get('provisional',False),
+                                    search=result.get('search'),passage=result.get('passage'),probe=probe)
                 self.show_display()
                 f = result['floor']
                 description=summary or f'布局 {f["layout_id"].split("_")[-1]} · {f["floor"]}'
@@ -364,6 +423,7 @@ class LiveController(base.LiveController):
             text=d.get('summary') or d['label']
             self.note('overlay_shown', f'地图已匹配 · {text}', floor_id=d['label'],
                       selected_floor=d.get('selected_floor'), capture_ms=current['capture_ms'],
+                      search=d.get('search'),passage=d.get('passage'),
                       positive_to_show_ms=round((time.monotonic()-getattr(self,'open_detected_at',current['at']))*1000))
 
     def tick(self):

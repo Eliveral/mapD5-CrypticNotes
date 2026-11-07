@@ -1,11 +1,12 @@
 """Check a visible overlay without periodically blanking the screen.
 
-The calculated pixels are used only to test if the view moved. New registrations
-always require an actual clean frame after removing an outdated projection.
+Calculated pixels only establish stationarity. Registrations use captured
+pixels in regions untouched by the overlay, or a full clean capture.
 """
 import cv2
 import numpy as np
 from copy import copy
+from .s1_alignment import geometry
 
 
 class LayerProbe:
@@ -13,6 +14,7 @@ class LayerProbe:
         self.size = (signature.shape[1], signature.shape[0])
         self.clean = cv2.resize(clean,self.size).astype(np.float32)
         opaque = cv2.bitwise_not(cv2.inRange(rendered,(0,0,0),(16,16,16)))
+        self.unpainted=cv2.bitwise_not(opaque)
         self.coverage = (cv2.resize(opaque,self.size).astype(np.float32)/255)[:,:,None]
         self.ink = cv2.resize(cv2.bitwise_and(rendered,rendered,mask=opaque),self.size).astype(np.float32)
         # Compare pixels near observed structures; dark, animated fog occupies
@@ -25,6 +27,17 @@ class LayerProbe:
             cv2.rectangle(self.label_area,(int(x*sx)-1,int(y*sy)-1),
                           (int((x+w)*sx)+1,int((y+h)*sy)+1),255,-1)
         self.area=(cv2.dilate(signature,np.ones((13,13),np.uint8))>0) & (self.label_area==0)
+        self.update_edges()
+
+    def update_edges(self):
+        g=geometry(self.clean.astype(np.uint8))
+        self.edge_area=(self.coverage[:,:,0]<.02)&(self.label_area==0)&self.area
+        self.walls=(cv2.morphologyEx(g,cv2.MORPH_GRADIENT,np.ones((3,3),np.uint8))>0)&self.edge_area
+
+    def uncovered_frame(self,frame):
+        # Use actual screen pixels only. Anything painted by the previous
+        # layer is excluded while we prepare its replacement, without blinking it off.
+        return cv2.bitwise_and(frame,frame,mask=self.unpainted)
 
     def with_reference(self, clean, signature):
         # The same rendered map has the same ink and coverage. On a verified
@@ -32,6 +45,7 @@ class LayerProbe:
         result = copy(self)
         result.clean = cv2.resize(clean,self.size).astype(np.float32)
         result.area = (cv2.dilate(signature,np.ones((13,13),np.uint8)) > 0) & (self.label_area==0)
+        result.update_edges()
         return result
 
     def stationary(self, frame, alpha):
@@ -45,4 +59,13 @@ class LayerProbe:
             delta = np.max(np.abs(sample-self.clean),axis=2)[self.area]
             if np.mean(delta) < 5 and np.mean(delta > 16) < .06:
                 return True
-        return False
+        # Animated fog, highlights and the player icon may change RGB without
+        # moving the room walls. Check structure in untouched pixels separately.
+        if self.walls.sum()<70:return False
+        current=geometry(raw.astype(np.uint8))
+        edges=(cv2.morphologyEx(current,cv2.MORPH_GRADIENT,np.ones((3,3),np.uint8))>0)&self.edge_area
+        if edges.sum()<70:return False
+        kernel=np.ones((3,3),np.uint8)
+        agreement=(cv2.dilate(np.uint8(edges),kernel)[self.walls].mean(),
+                   cv2.dilate(np.uint8(self.walls),kernel)[edges].mean())
+        return min(agreement)>.92

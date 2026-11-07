@@ -9,3 +9,5 @@
 包顶层 `map-pack.json` 声明 `format`、`version`、`files`（本包路径及 SHA-256）和 `downloads`（按哈希校验的上游 HTTPS PNG）。高清图也可以装在包内并列入 `files`，对应条目从 `downloads` 移除即可生成离线包。分发者应先核实对应图像的再分发授权。
 
 程序只在全部文件、图库、楼层、房间坐标和界面模板通过检查后才切换当前地图目录。每个资料版本在独立文件夹中，已安装的上一版不会被覆盖。
+
+3.7.3 可从 `config/s1_floor_relations.json` 的可选 `passages` 字段读取跨层通道。它以布局 ID 为键，每套布局提供各楼层高清图的 `sha`（SHA-256）和 `pairs` 列表。每一对包含名称 `name`、层号 `source` 与 `target`、高清原图坐标 `a` 与 `b`。格式实例见源码 `s1_passage_data.py`。更换某一层图像后，旧图校验值对应的通道会自动停用，维护者核对新图后重新登记。

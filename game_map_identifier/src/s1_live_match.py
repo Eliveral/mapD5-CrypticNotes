@@ -8,6 +8,7 @@ from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
 from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
+from .s1_handoff import FloorHandoff
 
 
 def map_area(image):
@@ -33,6 +34,28 @@ def same_view(a, b):
 
 
 class LiveMatcher(FloorMatcher):
+    def __init__(self,catalog,suppress_gradient=True):
+        super().__init__(catalog,suppress_gradient)
+        self.handoffs=FloorHandoff(self)
+        self.coordinates=self.handoffs.coords
+
+    def handoff(self,image,visit,target):
+        if not visit or not target or visit['floor']['floor']==target:return None
+        poses=visit.get('alternatives') or [visit]
+        rows=[]
+        for pose in poses:
+            found=self.handoffs.inherit(image,pose,target,map_area)
+            if not found:return None
+            rows.append(found)
+        result=dict(rows[0])
+        if 'revision' in visit:
+            # Keep the source pose, never retain its full-size frame or a chain of visits.
+            keys=('floor','matrix','player_hd','at','selected_floor','revision','game','roi','alternatives')
+            result['handoff_origin']={key:visit[key] for key in keys if key in visit}
+        if len(rows)>1:
+            result.update(common_floors=rows,possible_layouts=[a['floor']['layout_id'] for a in rows])
+        return result
+
     def check_search(self):
         callback=getattr(self,'search_guard',None)
         if callback:callback()
@@ -71,6 +94,9 @@ class LiveMatcher(FloorMatcher):
         keep=cv2.resize(keep,(width,height),interpolation=cv2.INTER_NEAREST)
         if allowed is not None:keep=cv2.bitwise_and(keep,allowed)
         rendered=cv2.bitwise_and(rendered,rendered,mask=keep)
+        if match.get('common_floors'):
+            match['label_tiles']=[]
+            return rendered
         if not hasattr(self,'room_labels'): self.room_labels=RoomLabels(self.catalog)
         reserved=cv2.dilate(markers,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))
         self.room_labels.on_live(rendered,match,allowed,cv2.resize(reserved,(width,height),interpolation=cv2.INTER_NEAREST))
@@ -79,6 +105,9 @@ class LiveMatcher(FloorMatcher):
     def locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
         if floor_name not in ('B1', 'B2', 'B3'):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
+        if visit and (not layout or layout==visit['floor']['layout_id']):
+            transfer=self.handoff(image,visit,floor_name)
+            if transfer:return transfer
         if not hasattr(self, 'corridors'):
             self.corridors = CorridorMatcher(self)
         if floor_name=='B1':

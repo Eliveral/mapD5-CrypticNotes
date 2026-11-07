@@ -24,7 +24,7 @@ class S1Window(tk.Tk):
     def __init__(self, autostart=True, controls=True, start_hidden=False):
         super().__init__()
         if start_hidden:self.withdraw()
-        self.title('MapD5 · 加页手记地图助手 3.7.2')
+        self.title('MapD5 · 加页手记地图助手 3.7.3')
         self.geometry('1100x760'); self.minsize(780,540); self.configure(bg=BG)
         self.reload_maps=False;self.resume_detection=autostart
         self.catalog=S1Catalog(map_root(project_root()))
@@ -48,7 +48,7 @@ class S1Window(tk.Tk):
         head=tk.Frame(self,bg=BG);head.pack(fill='x',padx=18,pady=(15,8))
         tk.Label(head,text='加页手记',bg=BG,fg=FG,font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
         tk.Label(head,text='磷光症  /  S1 噩梦',bg=BG,fg=MUTED,font=('Microsoft YaHei UI',12)).pack(side='left',padx=14)
-        tk.Label(head,text='MapD5  3.7.2',bg=BG,fg=MUTED).pack(side='right')
+        tk.Label(head,text='MapD5  3.7.3',bg=BG,fg=MUTED).pack(side='right')
         primary=tk.Frame(self,bg=PANEL);primary.pack(fill='x',padx=18,pady=(4,10))
         self.detect_button=tk.Button(primary,text='▶ 一键开启检测匹配',command=lambda:self.live.start(True),
             bg='#0f766e',fg='white',activebackground='#115e59',activeforeground='white',
@@ -69,6 +69,7 @@ class S1Window(tk.Tk):
         self.mode.pack(side='left');self.mode.bind('<<ComboboxSelected>>',lambda e:self.populate())
         self.file_button=ttk.Button(bar,text='从截图找候选',command=self.choose_screenshot);self.file_button.pack(side='left',padx=8)
         ttk.Button(bar,text='总图 / 单层',command=self.switch_pair).pack(side='left',padx=4)
+        ttk.Button(bar,text='上下层对照',command=self.show_overlap).pack(side='left',padx=4)
         ttk.Button(bar,text='适应窗口',command=self.fit).pack(side='left',padx=4)
         ttk.Button(bar,text='原图大小',command=self.actual_size).pack(side='left',padx=4)
         ttk.Button(bar,text='查看图源',command=self.open_source).pack(side='right')
@@ -249,6 +250,11 @@ class S1Window(tk.Tk):
                 self.status.set('候选顺序：'+' / '.join(f"{r['id'].split('_')[-1]}（结构点 {r['inliers']}）" for r in data)+'。请核对地图；这不是识别成功或准确率。切换图库可恢复全部条目。')
         except queue.Empty:pass
         self.after(120,self.poll)
+
+    def show_overlap(self):
+        if not self.current:return
+        from .s1_overlap import show_comparison
+        return show_comparison(self,self.catalog,self.current['layout_id'],self.last_gallery_floor)
 
     def open_source(self):
         if self.current:

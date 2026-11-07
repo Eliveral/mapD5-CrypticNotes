@@ -4,6 +4,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import json
+from .s1_passage_data import PASSAGES
 
 
 class FloorCoordinates:
@@ -13,12 +14,14 @@ class FloorCoordinates:
         config = catalog.root.parent.parent/'config'
         self.matrices = {}
         self.offsets = {}
+        self.passages = {}
         path = config/'s1_floor_relations.json'
         registration = config/'s1_hd_registration.json'
         if not path.is_file() or not registration.is_file():
             return  # An older installation can still match without positional hints.
         self.matrices = json.loads(registration.read_text(encoding='utf-8'))
-        for pair in json.loads(path.read_text(encoding='utf-8'))['pairs']:
+        document=json.loads(path.read_text(encoding='utf-8'))
+        for pair in document['pairs']:
             layout, a, b = pair['layout'], pair['source'], pair['target']
             first = catalog.by_id.get(f"hd_{layout[3:]}_{a}", {})
             second = catalog.by_id.get(f"hd_{layout[3:]}_{b}", {})
@@ -28,6 +31,14 @@ class FloorCoordinates:
             offset = np.median(anchors[:,1]-anchors[:,0], axis=0)
             self.offsets[layout,a,b] = offset
             self.offsets[layout,b,a] = -offset
+        for layout,group in {**PASSAGES,**document.get('passages',{})}.items():
+            for row in group['pairs']:
+                a,b=row['source'],row['target']
+                if any(catalog.by_id.get('hd_'+layout[3:]+'_'+lv,{}).get('sha256')!=group['sha'].get(lv) for lv in (a,b)):continue
+                pa,pb=np.asarray(row['a'],float),np.asarray(row['b'],float)
+                for src,dst,start,end in [(a,b,pa,pb),(b,a,pb,pa)]:
+                    self.passages.setdefault((layout,src,dst),[]).append((row['name'],start,end))
+                    self.offsets.setdefault((layout,src,dst),end-start)
 
     def predict(self, visit, target):
         source = visit['floor']

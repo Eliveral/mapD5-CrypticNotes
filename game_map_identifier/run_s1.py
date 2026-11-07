@@ -26,7 +26,9 @@ if __name__ == '__main__':
             prior_level=selected_floor(prior_image)
             if prior_level and MapVisibility(c.root/'ui').inspect(prior_image)['visible']:
                 previous=matcher.locate_selected(prior_image,None,prior_level)
-                if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:prior=previous
+                if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:
+                    prior=previous
+                    prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         if not presence['visible']:
             r = {'accepted':False}
         elif selected:
@@ -56,6 +58,14 @@ if __name__ == '__main__':
         assert tuple(app.mode['values'])==('高清单层','三层总览')
         app.change_opacity('35');assert app.opacity_label.get()=='35%' and app.overlay_alpha.get()==35
         app.change_opacity(str(DEFAULT_OVERLAY_OPACITY))
+        from tkinter import ttk
+        app.select()
+        window=app.show_overlap()
+        for btn in window.winfo_children()[0].winfo_children():
+            if isinstance(btn,ttk.Button):
+                btn.invoke()
+                assert window.winfo_children()[-1].image is not None
+        window.destroy()
         for e in (e for e in app.catalog.entries if e['kind'] in ('structure','hd')):
             app.kind.set({'structure':'三层总览','hd':'高清单层'}[e['kind']]);app.populate()
             app.tree.selection_set(e['id']);app.select();app.update()
