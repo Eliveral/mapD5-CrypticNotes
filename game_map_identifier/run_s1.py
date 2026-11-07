@@ -30,6 +30,7 @@ if __name__ == '__main__':
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
                 'display_source':r.get('display_source'),
+                'possible_layouts':r.get('possible_layouts',[]),'common_only':bool(r.get('common_floors')),
                 'render_sha256':hashlib.sha256(rendered.tobytes()).hexdigest() if rendered is not None else None,
                 'floor':r.get('floor',{}).get('id'),'inliers':r.get('inliers'),
                 'matrix':r['matrix'].tolist() if r['accepted'] else None,

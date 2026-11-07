@@ -1,5 +1,6 @@
 """Project actual source pixels at their native resolution in one resampling."""
 import json
+from collections import OrderedDict
 import cv2
 import numpy as np
 from .s1_catalog import read_image
@@ -11,19 +12,22 @@ class OriginalMap:
         self.catalog = matcher.catalog
         registration = self.catalog.root.parent.parent / 'config' / 's1_hd_registration.json'
         self.hd_to_template = json.loads(registration.read_text(encoding='utf-8'))
-        self.last = None
+        self.recent = OrderedDict()
 
     def source(self, floor):
         key = floor['id']
-        if self.last and self.last[0] == key:
-            return self.last[1:]
+        if key in self.recent:
+            self.recent.move_to_end(key)
+            return self.recent[key]
         source_id = 'hd_' + floor['id'].removeprefix('s1_')
         image = read_image(self.catalog.path(self.catalog.by_id[source_id]))
         matrix = np.float64(self.hd_to_template[floor['id']])
         backdrop = np.median(np.stack([image[0,0],image[0,-1],image[-1,0],image[-1,-1]]), axis=0)
-        keep = np.max(np.abs(image.astype(np.int16)-backdrop.astype(np.int16)), axis=2) > 3
-        image[~keep] = 0
-        self.last = (key, image, matrix, source_id)
+        color=backdrop.astype(int)
+        empty=cv2.inRange(image,tuple(map(int,color-3)),tuple(map(int,color+3)))
+        image=cv2.bitwise_and(image,image,mask=cv2.bitwise_not(empty))
+        self.recent[key]=(image,matrix,source_id)
+        if len(self.recent)>3:self.recent.popitem(last=False)
         return image, matrix, source_id
 
     def render(self, result, size):

@@ -6,6 +6,7 @@ from .s1_alignment import FloorMatcher, geometry, register
 from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
+from .s1_entrance import EntranceMatcher
 
 
 def map_area(image):
@@ -31,6 +32,10 @@ def same_view(a, b):
 
 
 class LiveMatcher(FloorMatcher):
+    def check_search(self):
+        callback=getattr(self,'search_guard',None)
+        if callback:callback()
+
     def render(self, match, size, style='original_clean'):
         if style == 'structure':
             return super().render(match, size, 'structure')
@@ -44,8 +49,6 @@ class LiveMatcher(FloorMatcher):
         height,width = frame.shape[:2]
         rendered = self.render(match,(width,height),style)
         allowed = None if manual else map_area(rendered)
-        if allowed is not None:
-            rendered[allowed==0] = 0
         # Leave the actual explored area and its player/item icons visible.
         factor = min(1., 900/max(width,height))
         small = cv2.resize(frame,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
@@ -55,7 +58,18 @@ class LiveMatcher(FloorMatcher):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9,9))
         seen = cv2.morphologyEx(seen,cv2.MORPH_CLOSE,kernel)
         seen = cv2.dilate(seen,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(13,13)))
-        rendered[cv2.resize(seen,(width,height),interpolation=cv2.INTER_NEAREST)>0] = 0
+        keep=cv2.bitwise_not(seen)
+        if match.get('common_floors'):
+            consensus=None
+            for row in match['common_floors']:
+                ref=self.template(row['floor'])[1]
+                geom=cv2.warpAffine(ref,row['matrix']*factor,(small.shape[1],small.shape[0]),flags=cv2.INTER_NEAREST)
+                if consensus is None:consensus=geom
+                else:consensus[geom!=consensus]=0
+            keep=cv2.bitwise_and(keep,np.uint8(consensus>0)*255)
+        keep=cv2.resize(keep,(width,height),interpolation=cv2.INTER_NEAREST)
+        if allowed is not None:keep=cv2.bitwise_and(keep,allowed)
+        rendered=cv2.bitwise_and(rendered,rendered,mask=keep)
         if not hasattr(self,'room_labels'): self.room_labels=RoomLabels(self.catalog)
         reserved=cv2.dilate(markers,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))
         self.room_labels.on_live(rendered,match,allowed,cv2.resize(reserved,(width,height),interpolation=cv2.INTER_NEAREST))
@@ -66,13 +80,24 @@ class LiveMatcher(FloorMatcher):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
         if not hasattr(self, 'corridors'):
             self.corridors = CorridorMatcher(self)
+        if floor_name=='B1':
+            if not hasattr(self,'entrances'):self.entrances=EntranceMatcher(self)
+            result=self.entrances.locate(image,map_area,layout)
+            if result is None:result=self.entrances.locate(image,map_area,layout,800)
+            if result and visit and result.get('common_floors'):
+                preferred=visit['floor']['layout_id']
+                verified=next((row for row in result['common_floors'] if row['floor']['layout_id']==preferred),None)
+                if verified and verified['consistency']>.95:
+                    result.update(verified,possible_layouts=[preferred],search='known_entrance')
+                    del result['common_floors']
+            if result is not None:return result
         if visit and (not layout or layout == visit['floor']['layout_id']):
             if not hasattr(self, 'coordinates'):
                 self.coordinates = FloorCoordinates(self.catalog)
             predicted, relation = self.coordinates.predict(visit, floor_name)
             basis = predicted if predicted is not None else np.asarray(visit['matrix'])
             native_scale = float(np.linalg.norm(basis[0,:2]))
-            factor = min(1.,1600/image.shape[1])
+            factor = min(1.,1000/image.shape[1])
             small = cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
             geom = geometry(small) & map_area(small)
             preferred = visit['floor']['layout_id']
@@ -137,6 +162,7 @@ class LiveMatcher(FloorMatcher):
         for floor in self.floors:
             if layout and floor['layout_id'] != layout: continue
             if floor_name and floor['floor'] != floor_name: continue
+            self.check_search()
             _, ref, (rp, rd) = self.template(floor)
             match = register(rp, rd, pts, des, min_fraction=.20)
             if match is None or match['inliers'] < 12: continue

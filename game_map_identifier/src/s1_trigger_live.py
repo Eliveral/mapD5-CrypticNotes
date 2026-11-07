@@ -3,12 +3,17 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 from . import s1_live as base
 from .s1_live_match import LiveMatcher, signature, same_view, map_area
 from .s1_floor_transition import selected_floor
 from .s1_layer_probe import LayerProbe
+
+
+class FloorChanged(Exception):
+    pass
 
 
 class LiveController(base.LiveController):
@@ -118,7 +123,17 @@ class LiveController(base.LiveController):
                     capture_ms=round((time.monotonic()-began)*1000, 1))))
             except Exception as exc:
                 self.events.put(('sample_error', str(exc)))
-        threading.Thread(target=grab, daemon=True).start()
+        if not getattr(self,'capture_worker',None):
+            self.capture_worker=ThreadPoolExecutor(max_workers=1,initializer=base.prepare_capture_thread)
+        self.capture_worker.submit(grab)
+
+    def close(self):
+        super().close()
+        worker=getattr(self,'capture_worker',None)
+        if worker:
+            worker.submit(base.release_capture_thread)
+            worker.shutdown(wait=False)
+            self.capture_worker=None
 
     def sample_received(self, sample):
         self.sampling = False
@@ -128,6 +143,9 @@ class LiveController(base.LiveController):
             self.due = 0
             return
         previous = self.latest
+        if sample['presence']['visible'] and (not previous or not previous['presence']['visible']
+                or previous.get('selected_floor')!=sample.get('selected_floor')):
+            self.open_detected_at=sample['at']
         if (previous and previous['presence']['visible'] and sample['presence']['visible'] and
                 previous.get('selected_floor') != sample.get('selected_floor')):
             self.generation += 1
@@ -200,6 +218,7 @@ class LiveController(base.LiveController):
         self.display = dict(signature=sample['signature'], rendered=cached['rendered'],
                             roi=sample['roi'], epoch=self.generation, game=sample['game'],
                             selected_floor=sample.get('selected_floor'), label=cached.get('label'),
+                            summary=cached.get('summary'),
                             probe=cached['probe'].with_reference(sample['frame'],sample['signature']))
         cached['at'] = time.monotonic()
         self.view_cache = cached
@@ -229,16 +248,23 @@ class LiveController(base.LiveController):
         cached = self.floor_cache if self.cache_identity == identity else None
         scale_hint = self.scale_hint if self.cache_identity == identity else None
         visited = self.floor_visits.get(sample.get('selected_floor'))
-        if not self.valid_visit(visited,sample,300):
-            visited = self.view_cache if self.valid_visit(self.view_cache,sample,300) else None
-        if visited and (not visited.get('unique_layout') or not visited.get('selected_floor')):
-            visited = None
+        priors=[visited,self.view_cache,*sorted(self.floor_visits.values(),key=lambda v:-v['at'])]
+        visited=next((v for v in priors if self.valid_visit(v,sample,300)
+                      and v.get('unique_layout') and v.get('selected_floor')),None)
         if cached and ((layout and layout != cached['layout_id']) or (floor and floor != cached['floor'])):
             cached = None
 
         def match():
             began = time.monotonic()
+            def guard():
+                current=self.latest
+                if (not self.active or self.closed or
+                    sample.get('revision',self.session_revision)!=self.session_revision or
+                    (current and current['presence']['visible'] and
+                     current.get('selected_floor')!=sample.get('selected_floor'))):
+                    raise FloorChanged()
             try:
+                self.matcher.search_guard=guard
                 observed = sample.get('selected_floor')
                 if observed and not sample['manual']:
                     if floor and floor != observed:
@@ -253,11 +279,16 @@ class LiveController(base.LiveController):
                         result = locate(sample['frame'], layout, floor)
                 rendered = None
                 if result['accepted']:
+                    guard()
                     rendered = self.matcher.render_live(result, sample['frame'], style, sample['manual'])
                     result['layer_probe'] = LayerProbe(sample['frame'],rendered,sample['signature'],result.get('label_tiles',()))
                 self.events.put(('matched', (sample, result, rendered, style, time.monotonic()-began)))
+            except FloorChanged:
+                self.events.put(('search_superseded',None))
             except Exception as exc:
                 self.events.put(('match_error', str(exc)))
+            finally:
+                if self.matcher.search_guard is guard:self.matcher.search_guard=None
         threading.Thread(target=match, daemon=True).start()
 
     def match_received(self, payload):
@@ -273,21 +304,23 @@ class LiveController(base.LiveController):
             self.start_match()
             return
         if result['accepted']:
+            alternatives=result.get('possible_layouts') or [result['floor']['layout_id']]
+            summary=f'负一共通区域 · {len(alternatives)} 套候选' if result.get('common_floors') else None
             if (not self.valid_visit(self.view_cache,sample,300) or
-                    self.view_cache['floor']['layout_id'] != result['floor']['layout_id']):
+                    self.view_cache['floor']['layout_id'] not in alternatives):
                 self.floor_visits.clear()
             self.floor_cache, self.cache_identity = result['floor'], (game.hwnd, game.pid)
             self.scale_hint = float(result.get('scale', np.linalg.norm(result['matrix'][0,:2])))
             probe = result.get('layer_probe') or LayerProbe(sample['frame'],rendered,sample['signature'])
             self.view_cache = dict(at=time.monotonic(), game=game, roi=sample['roi'], revision=self.session_revision,
-                                   selected_floor=sample.get('selected_floor'), label=result['floor']['id'],
+                                   selected_floor=sample.get('selected_floor'), label=result['floor']['id'],summary=summary,
                                    signature=sample['signature'], rendered=rendered, floor=result['floor'], probe=probe,
                                    matrix=np.array(result['matrix'],copy=True),
-                                   unique_layout=len(result.get('possible_layouts',[]))==1,
+                                   unique_layout=len(alternatives)==1,
                                    thumb=cv2.resize(sample['frame'], (320, 180)))
             if sample.get('selected_floor') == result['floor']['floor']:
                 self.floor_visits[sample['selected_floor']] = self.view_cache
-            self.note('layout_learned', layout=result['floor']['id'], elapsed=elapsed,
+            self.note('common_floor' if result.get('common_floors') else 'layout_learned', layout=result['floor']['id'], possible_layouts=alternatives, elapsed=elapsed,
                       inliers=result['inliers'], capture_epoch=sample['epoch'])
             current = self.latest
             if (sample['epoch'] == self.generation and current and current['presence']['visible'] and
@@ -297,10 +330,11 @@ class LiveController(base.LiveController):
                 self.locked_match = result
                 self.display = dict(signature=sample['signature'], rendered=rendered, roi=sample['roi'],
                                     epoch=self.generation, game=game, selected_floor=sample.get('selected_floor'),
-                                    label=result['floor']['id'], probe=probe)
+                                    label=result['floor']['id'],summary=summary, probe=probe)
                 self.show_display()
                 f = result['floor']
-                self.note('overlay_shown' if self.overlay._visible else 'match_ready', f'布局 {f["layout_id"].split("_")[-1]} · {f["floor"]} · 快捷键触发 · {elapsed:.2f}秒',
+                description=summary or f'布局 {f["layout_id"].split("_")[-1]} · {f["floor"]}'
+                self.note('overlay_shown' if self.overlay._visible else 'match_ready', f'{description} · {elapsed:.2f}秒',
                           layout=f['layout_id'], floor=f['floor'], inliers=result['inliers'],
                           matrix=result['matrix'].tolist(), error_px=result['error_px'], elapsed=elapsed,
                           style=style, capture_ms=sample['capture_ms'], selected_floor=sample.get('selected_floor'),
@@ -319,15 +353,18 @@ class LiveController(base.LiveController):
                 d['epoch'] != self.generation or not current['presence']['visible'] or
                 d.get('selected_floor') != current.get('selected_floor') or
                 base.foreground() != d['game'].hwnd or base.refresh_game(d['game']) != d['game']): return
-        if not d.get('uploaded') or not self.overlay.show_cached(d['roi']):
+        if not d.get('uploaded') or (not self.overlay._visible and not self.overlay.show_cached(d['roi'])):
             self.set_alpha(self.app.overlay_alpha.get())
             self.overlay.label_tiles=d['probe'].label_tiles
             self.overlay.show_image(d['rendered'], d['roi'], image_is_rgb=False)
             d['uploaded'] = True
         if not self.overlay._native_layered_enabled: self.capture_excluded = False
-        if self.overlay._visible and d.get('label'):
-            self.note('overlay_shown', f'地图已匹配 · {d["label"]}', floor_id=d['label'],
-                      selected_floor=d.get('selected_floor'), capture_ms=current['capture_ms'])
+        if self.overlay._visible and d.get('label') and not d.get('reported'):
+            d['reported']=True
+            text=d.get('summary') or d['label']
+            self.note('overlay_shown', f'地图已匹配 · {text}', floor_id=d['label'],
+                      selected_floor=d.get('selected_floor'), capture_ms=current['capture_ms'],
+                      positive_to_show_ms=round((time.monotonic()-getattr(self,'open_detected_at',current['at']))*1000))
 
     def tick(self):
         if self.closed: return
@@ -361,6 +398,8 @@ class LiveController(base.LiveController):
                     self.invalidate()
                     self.due = time.monotonic()+.5
                     self.note('capture_error', '截图重试中：'+data)
+                elif kind == 'search_superseded':
+                    self.matching=False;self.start_match()
                 elif kind == 'match_error':
                     self.matching = False
                     self.note('match_error', '匹配重试中：'+data)

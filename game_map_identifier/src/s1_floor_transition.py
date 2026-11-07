@@ -127,6 +127,7 @@ class CorridorMatcher:
             query = [cv2.resize(channel, size, interpolation=cv2.INTER_AREA) for channel in channels]
             norms = [float(q.sum()) for q in query]
             for floor in candidates:
+                self.matcher.check_search()
                 refs = self.reference_channels(floor)
                 left = top = 0
                 if center is not None:

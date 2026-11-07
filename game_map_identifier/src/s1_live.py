@@ -38,12 +38,34 @@ def own_window(hwnd):
     return pid.value == os.getpid()
 
 
+_capture_state=threading.local()
+
+
+def prepare_capture_thread():
+    _capture_state.persistent=True
+
+
+def release_capture_thread():
+    screen=getattr(_capture_state,'screen',None)
+    if screen is not None:
+        screen.close()
+        _capture_state.screen=None
+
+
 def capture(roi):
     x, y, w, h = roi
     if w <= 0 or h <= 0:
         raise ValueError('地图区域无效')
-    with mss.mss() as sct:
-        return np.array(sct.grab(dict(left=x, top=y, width=w, height=h)), dtype=np.uint8)[:, :, :3].copy()
+    box=dict(left=x,top=y,width=w,height=h)
+    if getattr(_capture_state,'persistent',False):
+        if not getattr(_capture_state,'screen',None):_capture_state.screen=mss.mss()
+        try:raw=_capture_state.screen.grab(box)
+        except Exception:
+            release_capture_thread()
+            raise
+    else:
+        with mss.mss() as sct:raw=sct.grab(box)
+    return cv2.cvtColor(np.asarray(raw),cv2.COLOR_BGRA2BGR)
 
 
 class Hotkeys:

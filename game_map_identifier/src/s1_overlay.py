@@ -7,7 +7,8 @@ from .gui import RouteMapOverlayWindow
 def room_surface(raw, tiles, opacity):
     # UpdateLayeredWindow expects premultiplied BGRA with constant alpha 255.
     surface=cv2.convertScaleAbs(raw,alpha=opacity)
-    surface[raw[:,:,3]==0]=0
+    valid=cv2.extractChannel(raw,3)
+    surface=cv2.bitwise_and(surface,surface,mask=valid)
     for x,y,mask in tiles:
         h,w=mask.shape
         region=np.s_[y:y+h,x:x+w]
