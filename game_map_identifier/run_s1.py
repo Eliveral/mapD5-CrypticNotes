@@ -82,21 +82,21 @@ if __name__ == '__main__':
                 'pose_adjustment':correction and correction['adjustment'],
                 'wall_error_before_px':correction and correction['before_px'],
                 'wall_error_after_px':correction and correction['after_px'],
-                'display_source':r.get('display_source'),
+                'display_source':r.get('display_source'),'visible_rooms':r.get('visible_rooms',[]),
                 'possible_layouts':r.get('possible_layouts',[]),'common_only':bool(r.get('common_floors')),
                 'prior_floor':prior['floor']['id'] if prior else None,'search':r.get('search'),
                 'render_sha256':hashlib.sha256(rendered.tobytes()).hexdigest() if rendered is not None else None,
                 'floor':r.get('floor',{}).get('id'),'inliers':r.get('inliers'),
                 'matrix':r['matrix'].tolist() if r['accepted'] else None,
                 'capture_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
-                'scope':'Saved actual game capture replay; no live input or projection'}
+                'scope':'Saved frame replay; no live input or projection'}
         (project_root()/'s1-capture-check.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         raise SystemExit(0)
     if '--self-check-ui' in sys.argv:
         import json
         from src.s1_window import S1Window, DEFAULT_OVERLAY_OPACITY
         from src.config import project_root
-        app=S1Window(autostart=False, controls=False, start_hidden=True);app.update();checked=[]
+        app=S1Window(autostart=False, controls=False, start_hidden=True);app.update();checked=[];alchemy_views=[]
         assert app.map_key.get() == 'Caps Lock' and app.overlay_style.get() == '高清底图'
         assert app.overlay_alpha.get()==DEFAULT_OVERLAY_OPACITY and app.opacity_label.get()=='28%'
         assert tuple(app.mode['values'])==('高清单层','三层总览')
@@ -116,6 +116,10 @@ if __name__ == '__main__':
             assert app.current['id']==e['id'] and app.original is not None and len(app.canvas.find_all())==1
             displayed=sorted(text for text,_,_ in app.gallery_labels)
             expected={'B1':[], 'B2':['维修站'], 'B3':['维修站','寰星房']}
+            if 'alchemy' in app.room_labels.points.get(e['layout_id']+'_B3', {}):
+                expected['B3'].append('炼金室')
+            if '炼金室' in displayed:
+                alchemy_views.append(e['id'])
             if e['kind']=='structure':
                 assert displayed==sorted(['B1','B2','B3',*expected['B2'],*expected['B3']])
             else:
@@ -139,7 +143,7 @@ if __name__ == '__main__':
         app.map_key.set('Caps Lock');app.change_map_key()
         button_check['configurable_map_key']=True
         app.destroy()
-        (project_root()/'s1-ui-check.json').write_text(json.dumps({'checked':checked,'one_click':button_check,'scope':'Tk render state and real button callbacks; not live-game visual inspection'},indent=2),encoding='utf-8')
+        (project_root()/'s1-ui-check.json').write_text(json.dumps({'checked':checked,'alchemy_views':alchemy_views,'one_click':button_check,'scope':'Tk render state and real button callbacks; not live-game visual inspection'},indent=2),encoding='utf-8')
         raise SystemExit(0)
     if '--self-check' in sys.argv:
         import json

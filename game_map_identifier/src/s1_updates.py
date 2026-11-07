@@ -106,7 +106,9 @@ def validate(root):
             raise ValueError('楼层配准数据无效')
         width,height=cat.by_id['hd_'+key.removeprefix('s1_')]['size']
         markers=points.get(key,{})
-        if set(markers)!={'B1':set(),'B2':{'supply'},'B3':{'supply','star'}}[level]:
+        required = {'B1':set(), 'B2':{'supply'}, 'B3':{'supply','star'}}[level]
+        allowed = required | {'alchemy'} if level == 'B3' else required
+        if not required <= set(markers) <= allowed:
             raise ValueError('房间标注不完整')
         for x,y in markers.values():
             if not (0<=x<width and 0<=y<height):raise ValueError('房间标注超出地图')

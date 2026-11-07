@@ -153,6 +153,7 @@ class LiveMatcher(FloorMatcher):
         rendered=cv2.bitwise_and(rendered,rendered,mask=keep)
         if match.get('common_floors'):
             match['label_tiles']=[]
+            match['visible_rooms']=[]
             return rendered
         if not hasattr(self,'room_labels'): self.room_labels=RoomLabels(self.catalog)
         reserved=cv2.dilate(markers,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))

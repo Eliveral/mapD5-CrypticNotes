@@ -8,7 +8,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-ROOM_NAMES = {'supply':'维修站', 'star':'寰星房'}
+from .s1_alchemy import ALCHEMY_CENTERS
+
+
+ROOM_NAMES = {'supply':'维修站', 'star':'寰星房', 'alchemy':'炼金室'}
 
 
 @lru_cache(maxsize=18)
@@ -37,6 +40,13 @@ class RoomLabels:
         self.points=json.loads((config/'s1_landmarks.json').read_text('utf-8'))
         self.hd_matrices=json.loads((config/'s1_hd_registration.json').read_text('utf-8'))
         self.catalog=catalog
+        for entry in catalog.entries:
+            if entry['kind'] != 'hd' or entry['floor'] != 'B3':
+                continue
+            center = ALCHEMY_CENTERS.get(entry['sha256'])
+            if center is not None:
+                fid = entry['layout_id'] + '_B3'
+                self.points.setdefault(fid, {}).setdefault('alchemy', center)
 
     def projected(self, fid, matrix):
         labels=[]
@@ -48,6 +58,7 @@ class RoomLabels:
     def on_live(self, rendered, match, allowed, reserved):
         fid=match['floor']['id']
         match['label_tiles']=[]
+        match['visible_rooms']=[]
         if fid not in self.points: return
         transform=match['matrix'] @ np.vstack((self.hd_matrices[fid],[0,0,1]))
         h,w=rendered.shape[:2]
@@ -65,6 +76,7 @@ class RoomLabels:
                 tile=Image.fromarray(rendered[roi][:,:,::-1])
                 tile.paste(sprite,(0,0),sprite)
                 rendered[roi]=np.asarray(tile)[:,:,::-1]
+                match['visible_rooms'].append(text)
                 match['label_tiles'].append((l,t,np.asarray(sprite.getchannel('A'))))
                 break
 
