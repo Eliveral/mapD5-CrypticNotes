@@ -24,7 +24,7 @@ class S1Window(tk.Tk):
     def __init__(self, autostart=True, controls=True, start_hidden=False):
         super().__init__()
         if start_hidden:self.withdraw()
-        self.title('MapD5 · 加页手记地图助手 3.7.4')
+        self.title('MapD5 · 加页手记地图助手 3.7.5')
         self.geometry('1100x760'); self.minsize(780,540); self.configure(bg=BG)
         self.reload_maps=False;self.resume_detection=autostart
         self.catalog=S1Catalog(map_root(project_root()))
@@ -48,7 +48,7 @@ class S1Window(tk.Tk):
         head=tk.Frame(self,bg=BG);head.pack(fill='x',padx=18,pady=(15,8))
         tk.Label(head,text='加页手记',bg=BG,fg=FG,font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
         tk.Label(head,text='磷光症  /  S1 噩梦',bg=BG,fg=MUTED,font=('Microsoft YaHei UI',12)).pack(side='left',padx=14)
-        tk.Label(head,text='MapD5  3.7.4',bg=BG,fg=MUTED).pack(side='right')
+        tk.Label(head,text='MapD5  3.7.5',bg=BG,fg=MUTED).pack(side='right')
         primary=tk.Frame(self,bg=PANEL);primary.pack(fill='x',padx=18,pady=(4,10))
         self.detect_button=tk.Button(primary,text='▶ 一键开启检测匹配',command=lambda:self.live.start(True),
             bg='#0f766e',fg='white',activebackground='#115e59',activeforeground='white',
@@ -60,6 +60,10 @@ class S1Window(tk.Tk):
         tk.Label(primary,textvariable=self.detect_state,bg=PANEL,fg='#5eead4',font=('Microsoft YaHei UI',11,'bold'),anchor='w').pack(fill='x',padx=12,pady=(12,2))
         self.live_status=tk.StringVar(value='切回游戏，按地图键即可检测。')
         tk.Label(primary,textvariable=self.live_status,bg=PANEL,fg=MUTED,font=('Microsoft YaHei UI',10),anchor='w',wraplength=480).pack(fill='x',padx=12,pady=(0,8))
+        self.round_status=tk.StringVar(value='等待负二确认本局布局')
+        roundbar=tk.Frame(primary,bg=PANEL);roundbar.pack(fill='x',padx=12,pady=(0,8))
+        tk.Label(roundbar,textvariable=self.round_status,bg=PANEL,fg='#5eead4',anchor='w').pack(side='left')
+        ttk.Button(roundbar,text='新对局',command=lambda:self.live.new_round()).pack(side='left',padx=8)
         tabs=ttk.Notebook(self);tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
         gallery=tk.Frame(tabs,bg=BG);settings=tk.Frame(tabs,bg=BG)
         self.update_panel=UpdatePanel(tabs,project_root()/'maps.zip',self.apply_maps,self.catalog.root.parent.parent)

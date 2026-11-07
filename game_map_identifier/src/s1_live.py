@@ -236,7 +236,8 @@ class LiveController:
             elif state == 'map_closed':
                 badge = '检测已开启 · 地图未展开'
             elif state == 'map_unmatched':
-                badge = '地图已展开 · 尚未确定布局'
+                locked=details.get('round_layout')
+                badge = f'本局布局 {locked[3:]} · 正在定位' if locked else '地图已展开 · 尚未确定布局'
             elif not self.game:
                 badge = '检测已开启 · 等待第五人格'
             elif foreground() != self.target:

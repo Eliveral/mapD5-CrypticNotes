@@ -41,7 +41,7 @@ class LiveMatcher(FloorMatcher):
         self.coordinates=self.handoffs.coords
         self.fixed_walls=FixedWalls(self)
 
-    def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None):
+    def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None,locked_layout=None):
         """Reuse a measured view of this floor, including one seen before a close."""
         if not prior.get('unique_layout') or prior.get('provisional'):return None
         layout=prior['floor']['layout_id']
@@ -59,7 +59,7 @@ class LiveMatcher(FloorMatcher):
         predicted,_=self.coordinates.predict(prior,target)
         if predicted is None:return None
         scale=float(np.linalg.norm(predicted[0,:2]))
-        fixed=self.fixed_walls.locate(features,floor,scale)
+        fixed=self.fixed_walls.locate(features,floor,scale,confirmed=(layout==locked_layout))
         if fixed:return fixed
         if image is not None and source_anchor and prior['floor']['floor']!=target:
             # A descent plus a pan can move the shared room off the old screen
@@ -217,11 +217,34 @@ class LiveMatcher(FloorMatcher):
                 if result['accepted'] or result.get('candidates'): break
         return result
 
-    def _locate_live(self, image, layout, floor_name, width, features):
+    def confirm_b2(self,image,clear=None):
+        # A pose suggested by a prior, a manual selection or an overlay must
+        # never count as an independent identification of the round.
+        hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)
+        if not hit['accepted'] or len(hit['possible_layouts'])!=1:return None
+        h,w=image.shape[:2]
+        span=np.ptp(hit['points'],axis=0)
+        rival=max((v['score'] for v in hit['candidates'][1:]),default=0.)
+        # A distributed six-room registration can survive small differences
+        # in atlas rasterization even with one fewer descriptor correspondence.
+        broad=(hit['verified_rooms']>=6 and hit['consistency']>=.94 and
+               hit['error_px']<=2. and rival<hit['score']*.5)
+        if (hit['verified_rooms']<5 or (hit['inliers']<14 and not broad) or hit['consistency']<.88 or
+                span[0]<w*.14 or span[1]<h*.16):return None
+        return hit
+
+    def _locate_live(self, image, layout, floor_name, width, features,verification=False,clear=None):
         factor = min(1., width/image.shape[1])
         small = cv2.resize(image, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
         geom = geometry(small, True)
         area = map_area(small)
+        if clear is not None:
+            mask=cv2.resize(clear,(small.shape[1],small.shape[0]),interpolation=cv2.INTER_AREA)
+            area &= cv2.erode(np.uint8(mask==255)*255,np.ones((7,7),np.uint8))
+        room=((geom==127)&(area>0)).astype(np.uint8)
+        count,labels,stats,_=cv2.connectedComponentsWithStats(room,8)
+        if verification and np.count_nonzero(stats[1:,cv2.CC_STAT_AREA]>=150)<5:
+            return dict(accepted=False,candidates=[],reason='可核对的负二固定房间不足。')
         feature_factor = min(1., features/max(geom.shape))
         fg = cv2.resize(geom, None, fx=feature_factor, fy=feature_factor)
         fm = cv2.resize(area, (fg.shape[1], fg.shape[0]), interpolation=cv2.INTER_NEAREST)
@@ -230,13 +253,11 @@ class LiveMatcher(FloorMatcher):
         # Validate on independent pixels, including multiple separate rooms.
         # Live partially explored maps contain many unmatched fog/UI corners;
         # use a lower RANSAC fraction ONLY with the stronger checks below.
-        room = ((geom == 127) & (area > 0)).astype(np.uint8)
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(room, 8)
         rows = []
         for floor in self.floors:
             if layout and floor['layout_id'] != layout: continue
             if floor_name and floor['floor'] != floor_name: continue
-            self.check_search()
+            if not verification:self.check_search()
             _, ref, (rp, rd) = self.template(floor)
             match = register(rp, rd, pts, des, min_fraction=.20)
             if match is None or match['inliers'] < 12: continue

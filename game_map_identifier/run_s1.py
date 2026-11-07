@@ -14,6 +14,7 @@ if __name__ == '__main__':
         from src.s1_view_motion import ViewFeatures
         from src.s1_floor_transition import selected_floor
         from src.s1_visibility import MapVisibility
+        from src.s1_round_lock import RoundLock
         cv2.setNumThreads(2)
         path=Path(sys.argv[sys.argv.index('--self-check-capture')+1])
         c=S1Catalog(map_root(project_root()))
@@ -21,6 +22,7 @@ if __name__ == '__main__':
         presence=MapVisibility(c.root/'ui').inspect(frame)
         selected = selected_floor(frame) if presence['visible'] else None
         matcher = LiveMatcher(c)
+        lock=RoundLock()
         prior=None
         if '--prior-capture' in sys.argv:
             prior_image=read_image(Path(sys.argv[sys.argv.index('--prior-capture')+1]))
@@ -31,20 +33,33 @@ if __name__ == '__main__':
                     prior=previous
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
+        for i,arg in enumerate(sys.argv):
+            if arg!='--confirm-b2':continue
+            image=read_image(Path(sys.argv[i+1]))
+            if selected_floor(image)!='B2' or not MapVisibility(c.root/'ui').inspect(image)['visible']:continue
+            proof=matcher.confirm_b2(image)
+            if proof:
+                proof.update(at=i,unique_layout=True,player_hd=matcher.handoffs.player_position(image,proof['floor'],proof['matrix']))
+                if lock.observe(proof) and lock.layout:
+                    prior,prior_image,prior_level=proof,image,'B2'
         if not presence['visible']:
             r = {'accepted':False}
         elif selected:
             r=matcher.handoff(frame,prior,selected) if prior else None
+            if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
                 anchor=dict(matrix=prior['matrix'],view_features=ViewFeatures(prior_image,map_area))
                 r=matcher.follow_known(ViewFeatures(frame,map_area),prior,selected,
-                    [anchor] if selected==prior_level else [],frame,anchor)
-            if not r:r=matcher.locate_selected(frame,None,selected,visit=prior)
+                    [anchor] if selected==prior_level else [],frame,anchor,lock.layout)
+            if not r:r=matcher.locate_selected(frame,lock.layout,selected,visit=prior)
         else:
-            r = matcher.locate_live(frame)
+            r = matcher.locate_live(frame,lock.layout)
+        if lock.layout and r['accepted'] and (r['floor']['layout_id']!=lock.layout or r.get('provisional')):
+            r={'accepted':False}
         rendered = matcher.render_live(r,frame) if r['accepted'] else None
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
+                'round_layout':lock.layout,'b2_votes':lock.count,
                 'display_source':r.get('display_source'),
                 'possible_layouts':r.get('possible_layouts',[]),'common_only':bool(r.get('common_floors')),
                 'prior_floor':prior['floor']['id'] if prior else None,'search':r.get('search'),

@@ -9,7 +9,7 @@ class FixedWalls:
         self.matcher=matcher
         self.refs={}
 
-    def locate(self,features,floor,scale):
+    def locate(self,features,floor,scale,confirmed=False):
         fid=floor['id']
         if fid not in self.refs:
             self.refs[fid]=turns(self.matcher.template(floor)[1],4)
@@ -57,7 +57,7 @@ class FixedWalls:
         n,zoom,off,points=candidates[0]
         center=np.mean(points,axis=0)
         rival=max((c[0] for c in candidates[1:] if np.linalg.norm((center-off)/zoom-(center-c[2])/c[1])*zoom>10),default=0)
-        if n<.34*len(query) or n-rival<max(2,n*.12):return None
+        if (not confirmed and n<.34*len(query)) or n-rival<max(2,n*.12):return None
         mat=np.float64([[zoom,0,off[0]],[0,zoom,off[1]]])
         h,w=features.geom.shape
         refgeom=self.matcher.template(floor)[1]
@@ -76,7 +76,7 @@ class FixedWalls:
             # Optional rooms can explain localized disagreement. Contradictions
             # across several distinct areas are evidence against this layout.
             observed=np.uint8((features.geom==label)&(features.valid>0))
-            if supported[observed>0].mean()<.88:
+            if not confirmed and supported[observed>0].mean()<.88:
                 count,ids,stats,_=cv2.connectedComponentsWithStats(observed)
                 support=np.bincount(ids.ravel(),weights=supported.ravel(),minlength=count)
                 large=stats[1:,4]>max(35,observed.sum()*.005)
