@@ -111,6 +111,68 @@ class FloorHandoff:
         if 'B1' not in (level,target) and not near:return None
         return self.result(floor,mat,name,val,False)
 
+    def paired_edges(self, small, geom, valid, floor, predicted, factor, visit):
+        # At the inherited camera, visible straight sides can corroborate a pose
+        # even when the rounded fog boundary cuts most of the actual room away.
+        _, ids, stats, _ = cv2.connectedComponentsWithStats(np.uint8(geom>0))
+        if len(stats)<2:
+            return None
+        main=1+int(np.argmax(stats[1:,4]))
+        x,y,w,h,count=stats[main]
+        if min(w,h)<12 or count<100:
+            return None
+        margin=3
+        x,y=max(0,x-margin),max(0,y-margin)
+        crop=np.s_[y:y+h+2*margin,x:x+w+2*margin]
+        observed=geom[crop].copy()
+        observed[ids[crop]!=main]=0
+        camera=predicted*factor
+        camera[:,2]-=[x,y]
+        source=visit['floor']
+        if min(np.sum(observed==127),np.sum(observed==255))<25:
+            # A lone generic corner must have a source player at a paired passage.
+            player=visit.get('player_hd')
+            if player is None:
+                return None
+            point=np.rint(np.asarray(self.coords.matrices[source['id']])@[*player,1]).astype(int)
+            at_source=False
+            for _,start,end in self.coords.passages[source['layout_id'],'B2','B3']:
+                site=self.site(source,start)
+                if site is not None:
+                    mask=site[0];px,py=point
+                    if 0<=px<mask.shape[1] and 0<=py<mask.shape[0] and mask[py,px]:
+                        target=self.site(floor,end)
+                        if target is None:continue
+                        projected=cv2.warpAffine(target[0],camera,observed.shape[1::-1],flags=cv2.INTER_NEAREST)
+                        rooms=observed==127
+                        if rooms.any() and projected[rooms].mean()>.90:
+                            at_source=True;break
+            if not at_source:return None
+        reference=self.matcher.template(floor)[1]
+        model=cv2.warpAffine(reference,camera,observed.shape[1::-1],flags=cv2.INTER_NEAREST)
+        sharp=cv2.Canny(cv2.cvtColor(small[crop],cv2.COLOR_BGR2GRAY),25,60)
+        sharp=(cv2.dilate(sharp,np.ones((3,3),np.uint8))>0)&(cv2.erode(valid[crop],np.ones((7,7),np.uint8))>0)
+        supported=[0,0];rates=[]
+        for label in (127,255):
+            room=np.uint8(observed==label)*255
+            if np.count_nonzero(room)<25:continue
+            atlas=np.uint8(model==label)*255
+            expanded=cv2.dilate(atlas,np.ones((3,3),np.uint8))
+            if np.mean(expanded[room>0]>0)<.91:return None
+            for i,(side,wall) in enumerate(zip(self.sides(room),self.sides(atlas))):
+                axis=i//2
+                kernel=np.ones((8,1) if axis==0 else (1,8),np.uint8)
+                line=cv2.morphologyEx(np.uint8((side>0)&sharp),cv2.MORPH_OPEN,kernel)
+                n=np.count_nonzero(line)
+                if n<8:continue
+                agreement=float(cv2.dilate(wall,np.ones((5,5),np.uint8))[line>0].mean())
+                if agreement>=.85:supported[axis]+=n;rates.append(agreement)
+                elif n>=16:return None
+        if min(supported)<10:return None
+        result=self.result(floor,predicted,'上下层对应位置',min(rates),False)
+        result['search']='paired_camera'
+        return result
+
     @staticmethod
     def straight_walls(room,edges):
         # Fog has a rounded edge. On each axis choose the longest straight

@@ -235,6 +235,8 @@ class LiveController(base.LiveController):
                     possible_layouts=[identity])
                 self.pose_fixes[anchor['floor']['id']]=anchor
             self.due=0.
+        if state.layout and state.layout!=previous:
+            threading.Thread(target=self.matcher.prepare_paired_floor,args=(state.layout,),daemon=True).start()
         event=('round_rechecking' if state.challenger else 'round_corrected' if previous and previous!=state.layout
                else 'round_locked' if state.layout else 'round_confirming')
         self.note(event,state.status(),layout=identity,confirmations=state.proposal_count if state.challenger else state.count)
@@ -276,6 +278,8 @@ class LiveController(base.LiveController):
         proposal=self.round_lock.proposal if automatic else None
         known_b2=proposal or (None if self.round_lock.b1_conflict else self.round_lock.reference)
         known_visit=self.floor_visits.get('B2')
+        pair_locked=locked if automatic and override==locked and not (
+            self.round_lock.uncertain or self.round_lock.challenger or self.round_lock.b1_conflict) else None
         b1_visit=self.floor_visits.get('B1')
         recheck_b2=automatic and self.round_lock.b1_conflict
         lifetime=float('inf') if locked else 300
@@ -312,6 +316,12 @@ class LiveController(base.LiveController):
                     last=next((v for v in (last,known_b2,known_visit) if v and v.get('selected_floor')=='B2' and
                                self.valid_visit(v,dict(game=game,roi=roi),lifetime) and wanted in (None,v['floor']['layout_id'])),None)
                     if recheck_b2 and not proposal:last=None
+                if floor=='B3' and pair_locked and (not last or last['selected_floor']!='B3'):
+                    # A visit to B1 or a delayed proof must not eclipse the latest B2 camera.
+                    paired=[v for v in (last,known_visit,known_b2) if v and v.get('selected_floor')=='B2'
+                            and v['floor']['layout_id']==pair_locked and v.get('unique_layout')
+                            and not v.get('provisional') and self.valid_visit(v,dict(game=game,roi=roi),lifetime)]
+                    if paired:last=max(paired,key=lambda v:v.get('sample_at',v['at']))
                 scores=presence.get('scores',{})
                 # A single weak HUD button is common during map animations.
                 # Only bridge a recently confirmed, still-selected map. A close
@@ -358,7 +368,9 @@ class LiveController(base.LiveController):
                 if (not independent_b1 and not result and presence['visible'] and origin and floor and self.valid_visit(origin,sample,lifetime) and
                         floor!=origin['selected_floor'] and floor_limit in ('自动',floor)
                         and wanted in (None,origin['floor']['layout_id']) and not self.warming):
-                    result=self.matcher.handoff(frame,origin,floor)
+                    if pair_locked and floor=='B3' and origin['selected_floor']=='B2':
+                        result=self.matcher.paired_b3(frame,origin,pair_locked,clear)
+                    if result is None:result=self.matcher.handoff(frame,origin,floor)
                     if locked and result and result.get('provisional'):result=None
                 track=(presence['visible'] and last and floor and not self.warming and
                        floor_limit in ('自动',floor) and wanted in (None,last['floor']['layout_id']) and

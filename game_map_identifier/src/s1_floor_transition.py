@@ -105,7 +105,7 @@ class CorridorMatcher:
         return self.reference[floor['id']]
 
     def locate(self, geom, layout, floor_name, scale_hint=None, *, quick=False, predicted=None,
-               zoom_ratios=(.94,1.,1.06)):
+               zoom_ratios=(.94,1.,1.06), paired=False):
         if floor_name not in ('B1', 'B2', 'B3'):
             return None
         _, labels, stats, _ = cv2.connectedComponentsWithStats((geom > 0).astype(np.uint8))
@@ -113,14 +113,14 @@ class CorridorMatcher:
             return None
         main = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         x, y, width, height, _ = stats[main]
-        if min(width, height) < 65:
+        if min(width, height) < (30 if paired else 65):
             return None
         crop = geom[y:y+height, x:x+width].copy()
         crop[labels[y:y+height, x:x+width] != main] = 0
         hull = np.zeros_like(crop)
         cv2.fillConvexPoly(hull, cv2.convexHull(cv2.findNonZero(crop)), 1)
         masks = [crop == 127, crop == 255, (hull != 0) & (crop == 0)]
-        if any(np.count_nonzero(mask) < max(150, crop.size * .045) for mask in masks):
+        if any(np.count_nonzero(mask) < max(45 if paired else 150, crop.size * .045) for mask in masks):
             return None
         channels = [mask.astype(np.float32) for mask in masks]
         floors = [f for f in self.matcher.floors if f['floor'] == floor_name and (not layout or f['layout_id'] == layout)]

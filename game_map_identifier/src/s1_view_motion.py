@@ -1,4 +1,5 @@
 """Measure pan/zoom from explored game pixels, independent of the painted overlay."""
+from functools import cached_property
 import cv2
 import numpy as np
 from .s1_alignment import geometry
@@ -14,13 +15,23 @@ class ViewFeatures:
             valid=cv2.bitwise_and(valid,np.uint8(clear>=252)*255)
         self.valid=cv2.erode(valid,np.ones((5,5),np.uint8))
         self.geom=geometry(small)&self.valid
-        mask=cv2.dilate(np.uint8(self.geom>0)*255,np.ones((5,5),np.uint8))&self.valid
-        # Retain texture as well as walls. Grey fog and stationary interface
-        # elements must not vote for a zero displacement when the map moves.
         self.gray=cv2.cvtColor(small,cv2.COLOR_BGR2GRAY)
+
+    @cached_property
+    def keypoints(self):
+        # The first overlay needs only a pose. Compute tracking descriptors
+        # when comparing two views, after the first pose can already be shown.
+        mask=cv2.dilate(np.uint8(self.geom>0)*255,np.ones((5,5),np.uint8))&self.valid
         features,desc=cv2.SIFT_create(nfeatures=370,contrastThreshold=.009).detectAndCompute(self.gray,mask)
-        self.points=np.float32([p.pt for p in features]).reshape(-1,2)
-        self.descriptors=desc
+        return np.float32([p.pt for p in features]).reshape(-1,2),desc
+
+    @property
+    def points(self):
+        return self.keypoints[0]
+
+    @property
+    def descriptors(self):
+        return self.keypoints[1]
 
     def motion_to(self,other):
         if len(self.points)<20:

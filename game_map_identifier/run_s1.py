@@ -52,7 +52,8 @@ if __name__ == '__main__':
         elif selected:
             if selected=='B2' and prior and prior['floor']['floor']!='B2':
                 prior=None
-            r=matcher.handoff(frame,prior,selected) if prior else None
+            r=matcher.paired_b3(frame,prior,lock.layout) if selected=='B3' else None
+            if r is None and prior:r=matcher.handoff(frame,prior,selected)
             if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
                 anchor=dict(matrix=prior['matrix'],view_features=ViewFeatures(prior_image,map_area))

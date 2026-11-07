@@ -45,6 +45,44 @@ class LiveMatcher(FloorMatcher):
         self.coordinates=self.handoffs.coords
         self.fixed_walls=FixedWalls(self)
         self.pose_check=PoseCheck(self)
+        self.corridors = CorridorMatcher(self)
+        self.original = OriginalMap(self)
+
+    def prepare_paired_floor(self, layout):
+        floor = self.handoffs.floors.get(layout+'_B3')
+        if floor and (layout,'B2','B3') in self.coordinates.passages:
+            self.original.source(floor)
+            self.corridors.reference_channels(floor)
+
+    def paired_b3(self, image, visit, locked, clear=None):
+        """Register a confirmed B2's B3 on the capture worker, including after a camera reset."""
+        if (not visit or not locked or not visit.get('unique_layout') or visit.get('provisional')
+                or visit['floor']['id'] != locked+'_B2'
+                or (locked,'B2','B3') not in self.coordinates.passages):
+            return None
+        predicted,_ = self.coordinates.predict(visit,'B3')
+        if predicted is None:
+            return None
+        floor = self.handoffs.floors[locked+'_B3']
+        factor = min(1.,1000/image.shape[1])
+        small = cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
+        valid = map_area(small)
+        if clear is not None:
+            mask = cv2.resize(clear,small.shape[1::-1],interpolation=cv2.INTER_AREA)
+            valid &= np.uint8(mask >= 252)*255
+        geom = geometry(small) & valid
+        fixed = self.handoffs.paired_edges(small,geom,valid,floor,predicted,factor,visit)
+        if fixed is not None:
+            return fixed
+        scale = float(np.linalg.norm(predicted[0,:2]))
+        hit = self.corridors.locate(geom,locked,'B3',scale*factor,quick=True,predicted=predicted*factor,
+                                    zoom_ratios=(1.,.90,1.10,.80,1.20),paired=True)
+        if hit is not None:
+            hit['matrix'] /= factor
+            hit['scale'] /= factor
+            hit['search'] = 'paired_corridor'
+            hit['passage'] = '锁定布局·负三墙线'
+        return hit
 
     def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None,locked_layout=None):
         """Reuse a measured view of this floor, including one seen before a close."""
