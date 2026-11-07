@@ -37,29 +37,51 @@ if __name__ == '__main__':
             if arg!='--confirm-b2':continue
             image=read_image(Path(sys.argv[i+1]))
             if selected_floor(image)!='B2' or not MapVisibility(c.root/'ui').inspect(image)['visible']:continue
-            proof=matcher.confirm_b2(image)
+            proof=matcher.confirm_b2(image,incumbent=lock.layout)
             if proof:
                 proof.update(at=i,unique_layout=True,player_hd=matcher.handoffs.player_position(image,proof['floor'],proof['matrix']))
-                if lock.observe(proof) and lock.layout:
+                if lock.observe(proof):
                     prior,prior_image,prior_level=proof,image,'B2'
+        target_layout=lock.preferred(selected)
         if not presence['visible']:
             r = {'accepted':False}
+        elif selected=='B1':
+            r=matcher.review_b1(frame) or {'accepted':False}
+        elif lock.uncertain or (lock.challenger and selected!='B2'):
+            r={'accepted':False}
         elif selected:
+            if selected=='B2' and prior and prior['floor']['floor']!='B2':
+                prior=None
             r=matcher.handoff(frame,prior,selected) if prior else None
             if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
                 anchor=dict(matrix=prior['matrix'],view_features=ViewFeatures(prior_image,map_area))
                 r=matcher.follow_known(ViewFeatures(frame,map_area),prior,selected,
                     [anchor] if selected==prior_level else [],frame,anchor,lock.layout)
-            if not r:r=matcher.locate_selected(frame,lock.layout,selected,visit=prior)
+            if not r:r=matcher.locate_selected(frame,target_layout,selected,visit=prior)
+            if selected=='B2' and not r['accepted']:
+                proof=matcher.confirm_b2(frame,incumbent=lock.layout)
+                if proof and target_layout in (None,proof['floor']['layout_id']) and not proof.get('conflicting_models'):
+                    r=proof
         else:
             r = matcher.locate_live(frame,lock.layout)
-        if lock.layout and r['accepted'] and (r['floor']['layout_id']!=lock.layout or r.get('provisional')):
+        if target_layout and r['accepted'] and (r['floor']['layout_id']!=target_layout or (lock.layout and r.get('provisional'))):
             r={'accepted':False}
+        correction=None
+        if r['accepted'] and '--pose-offset' in sys.argv and not r.get('common_floors'):
+            i=sys.argv.index('--pose-offset')
+            prior_matrix=r['matrix'].copy()
+            prior_matrix[:,2]+=[float(sys.argv[i+1]),float(sys.argv[i+2])]
+            correction=matcher.pose_check.check(frame,map_area,None,r['floor'],prior_matrix,
+                        'original_clean',lock.layout==r['floor']['layout_id'])
+            if correction:r=correction
         rendered = matcher.render_live(r,frame) if r['accepted'] else None
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
-                'round_layout':lock.layout,'b2_votes':lock.count,
+                'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
+                'pose_adjustment':correction and correction['adjustment'],
+                'wall_error_before_px':correction and correction['before_px'],
+                'wall_error_after_px':correction and correction['after_px'],
                 'display_source':r.get('display_source'),
                 'possible_layouts':r.get('possible_layouts',[]),'common_only':bool(r.get('common_floors')),
                 'prior_floor':prior['floor']['id'] if prior else None,'search':r.get('search'),

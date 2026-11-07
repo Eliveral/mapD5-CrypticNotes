@@ -2,6 +2,7 @@
 from __future__ import annotations
 import cv2
 import numpy as np
+import threading
 from .s1_alignment import FloorMatcher, geometry, register
 from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
@@ -10,6 +11,8 @@ from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
+from .s1_pose_check import PoseCheck
+from .s1_b2_review import compare_walls
 
 
 def map_area(image):
@@ -37,9 +40,11 @@ def same_view(a, b):
 class LiveMatcher(FloorMatcher):
     def __init__(self,catalog,suppress_gradient=True):
         super().__init__(catalog,suppress_gradient)
+        self._search_thread=threading.local()
         self.handoffs=FloorHandoff(self)
         self.coordinates=self.handoffs.coords
         self.fixed_walls=FixedWalls(self)
+        self.pose_check=PoseCheck(self)
 
     def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None,locked_layout=None):
         """Reuse a measured view of this floor, including one seen before a close."""
@@ -94,6 +99,24 @@ class LiveMatcher(FloorMatcher):
         callback=getattr(self,'search_guard',None)
         if callback:callback()
 
+    @property
+    def search_guard(self):
+        return getattr(self._search_thread,'guard',None)
+
+    @search_guard.setter
+    def search_guard(self,value):
+        self._search_thread.guard=value
+
+    def review_b1(self,image):
+        if not hasattr(self,'entrances'):self.entrances=EntranceMatcher(self)
+        for width in (960,800):
+            hit=self.entrances.locate(image,map_area,None,width)
+            if hit is not None:return hit
+        hit=self._locate_live(image,None,'B1',1280,1024)
+        # Feature matching may find several equivalent layouts without
+        # registering each row for a consensus overlay.
+        return hit if hit['accepted'] and len(hit['possible_layouts'])==1 else None
+
     def render(self, match, size, style='original_clean'):
         if style == 'structure':
             return super().render(match, size, 'structure')
@@ -139,6 +162,11 @@ class LiveMatcher(FloorMatcher):
     def locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
         if floor_name not in ('B1', 'B2', 'B3'):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
+        if floor_name=='B1' and not layout:
+            return self.review_b1(image) or dict(accepted=False,candidates=[],reason='当前负一缺少可独立定位的固定墙线。')
+        if floor_name=='B2' and not layout and visit and visit['floor']['floor']!='B2':
+            scale_hint=float(np.linalg.norm(visit['matrix'][0,:2]))
+            visit=None
         if visit and (not layout or layout==visit['floor']['layout_id']):
             transfer=self.handoff(image,visit,floor_name)
             if transfer:return transfer
@@ -148,7 +176,7 @@ class LiveMatcher(FloorMatcher):
             if not hasattr(self,'entrances'):self.entrances=EntranceMatcher(self)
             result=self.entrances.locate(image,map_area,layout)
             if result is None:result=self.entrances.locate(image,map_area,layout,800)
-            if result and visit and result.get('common_floors'):
+            if result and visit and layout and result.get('common_floors'):
                 preferred=visit['floor']['layout_id']
                 verified=next((row for row in result['common_floors'] if row['floor']['layout_id']==preferred),None)
                 if verified and verified['consistency']>.95:
@@ -217,12 +245,37 @@ class LiveMatcher(FloorMatcher):
                 if result['accepted'] or result.get('candidates'): break
         return result
 
-    def confirm_b2(self,image,clear=None):
+    def confirm_b2(self,image,clear=None,incumbent=None):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.
         hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)
+        full=self.broad_b2(hit,image.shape)
+        if full and not incumbent:
+            full['proof_kind']='full'
+            return full
+        wall,support=compare_walls(self,image,map_area,clear,full)
+        if not wall:
+            if full and full['floor']['layout_id']==incumbent:
+                full['proof_kind']='full'
+                return full
+            return None
+        if full and full['floor']['layout_id']!=wall['floor']['layout_id']:
+            if incumbent:
+                wall['conflicting_models']=True
+                return wall
+            return None
+        if full:
+            full.update(proof_kind='full',cells=wall['cells'])
+            result=full
+        else:result=wall
+        result['contradicts']=bool(incumbent and incumbent!=wall['floor']['layout_id'] and
+                                   support.get(incumbent,0)<.70*wall['inliers'])
+        return result
+
+    @staticmethod
+    def broad_b2(hit,shape):
         if not hit['accepted'] or len(hit['possible_layouts'])!=1:return None
-        h,w=image.shape[:2]
+        h,w=shape[:2]
         span=np.ptp(hit['points'],axis=0)
         rival=max((v['score'] for v in hit['candidates'][1:]),default=0.)
         # A distributed six-room registration can survive small differences
