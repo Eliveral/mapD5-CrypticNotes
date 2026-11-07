@@ -1,0 +1,8 @@
+__pycache__/
+build/
+dist/
+runtime/
+*.zip
+*.exe
+*.pyc
+s1-*-check.json

@@ -1,0 +1,2 @@
+"""Game map identifier package."""
+
