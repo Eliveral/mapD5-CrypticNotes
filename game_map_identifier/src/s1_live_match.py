@@ -9,6 +9,7 @@ from .s1_landmarks import RoomLabels
 from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
 from .s1_handoff import FloorHandoff
+from .s1_fixed_walls import FixedWalls
 
 
 def map_area(image):
@@ -38,6 +39,39 @@ class LiveMatcher(FloorMatcher):
         super().__init__(catalog,suppress_gradient)
         self.handoffs=FloorHandoff(self)
         self.coordinates=self.handoffs.coords
+        self.fixed_walls=FixedWalls(self)
+
+    def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None):
+        """Reuse a measured view of this floor, including one seen before a close."""
+        if not prior.get('unique_layout') or prior.get('provisional'):return None
+        layout=prior['floor']['layout_id']
+        floor=self.handoffs.floors.get(layout+'_'+target)
+        if floor is None:return None
+        for anchor in anchors:
+            relative=anchor['view_features'].motion_to(features)
+            if relative is None:continue
+            change,count,agreement=relative
+            mat=change@np.vstack((anchor['matrix'],[0,0,1]))
+            return dict(accepted=True,floor=floor,matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
+                        inliers=count,score=agreement,consistency=agreement,error_px=None,
+                        possible_layouts=[layout],candidates=[],segmentation='view_motion',
+                        search='view_motion',handoff_origin=anchor.get('handoff_origin'))
+        predicted,_=self.coordinates.predict(prior,target)
+        if predicted is None:return None
+        scale=float(np.linalg.norm(predicted[0,:2]))
+        fixed=self.fixed_walls.locate(features,floor,scale)
+        if fixed:return fixed
+        if image is not None and source_anchor and prior['floor']['floor']!=target:
+            # A descent plus a pan can move the shared room off the old screen
+            # position. Measure its motion and verify the target atlas independently.
+            relative=source_anchor['view_features'].motion_to(features)
+            if relative is not None:
+                mat=relative[0]@np.vstack((source_anchor['matrix'],[0,0,1]))
+                transfer=self.handoff(image,dict(prior,matrix=mat),target)
+                if transfer and transfer.get('passage')=='重叠视角' and not transfer.get('provisional'):
+                    transfer['search']='moving_passage'
+                    return transfer
+        return None
 
     def handoff(self,image,visit,target):
         if not visit or not target or visit['floor']['floor']==target:return None

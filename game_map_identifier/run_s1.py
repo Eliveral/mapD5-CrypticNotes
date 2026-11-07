@@ -10,7 +10,8 @@ if __name__ == '__main__':
         from pathlib import Path
         from src.config import project_root
         from src.s1_catalog import S1Catalog, read_image
-        from src.s1_live_match import LiveMatcher
+        from src.s1_live_match import LiveMatcher,map_area
+        from src.s1_view_motion import ViewFeatures
         from src.s1_floor_transition import selected_floor
         from src.s1_visibility import MapVisibility
         cv2.setNumThreads(2)
@@ -28,11 +29,17 @@ if __name__ == '__main__':
                 previous=matcher.locate_selected(prior_image,None,prior_level)
                 if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:
                     prior=previous
+                    prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         if not presence['visible']:
             r = {'accepted':False}
         elif selected:
-            r = matcher.locate_selected(frame, None, selected,visit=prior)
+            r=matcher.handoff(frame,prior,selected) if prior else None
+            if prior and not r:
+                anchor=dict(matrix=prior['matrix'],view_features=ViewFeatures(prior_image,map_area))
+                r=matcher.follow_known(ViewFeatures(frame,map_area),prior,selected,
+                    [anchor] if selected==prior_level else [],frame,anchor)
+            if not r:r=matcher.locate_selected(frame,None,selected,visit=prior)
         else:
             r = matcher.locate_live(frame)
         rendered = matcher.render_live(r,frame) if r['accepted'] else None

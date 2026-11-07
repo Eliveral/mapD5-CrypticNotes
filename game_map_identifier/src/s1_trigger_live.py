@@ -10,6 +10,7 @@ from . import s1_live as base
 from .s1_live_match import LiveMatcher, signature, same_view, map_area
 from .s1_floor_transition import selected_floor
 from .s1_layer_probe import LayerProbe
+from .s1_view_motion import ViewFeatures
 
 
 class FloorChanged(Exception):
@@ -27,6 +28,7 @@ class LiveController(base.LiveController):
         self.scale_hint = None
         self.view_cache = None
         self.floor_visits = {}
+        self.view_anchors={}
         self.session_revision = 0
         self.cache_identity = None
         self.last_note_state = None
@@ -38,7 +40,7 @@ class LiveController(base.LiveController):
     def note(self, state, message=None, **details):
         now = time.monotonic()
         # Do not rewrite a 200-event JSON file on every high-rate sample.
-        if state == self.last_note_state and now-self.last_note_at < 1.5:
+        if state == self.last_note_state and (state=='map_closed' or now-self.last_note_at < 1.5):
             return
         self.last_note_state, self.last_note_at = state, now
         super().note(state, message, **details)
@@ -67,6 +69,7 @@ class LiveController(base.LiveController):
 
     def clear_visits(self):
         self.floor_visits.clear()
+        self.view_anchors={}
         self.view_cache = self.floor_cache = self.scale_hint = self.cache_identity = None
 
     def valid_visit(self, visit, sample, lifetime):
@@ -93,7 +96,7 @@ class LiveController(base.LiveController):
     def launch(self):
         if not self.game or base.foreground() != self.game.hwnd: return
         self.ensure_overlay()
-        shown = self.display if self.overlay._visible and not self.capture_excluded else None
+        shown = getattr(self,'painted',None) if self.overlay._visible and not self.capture_excluded else None
         probe = shown.get('probe') if shown else None
         opacity = self.app.overlay_alpha.get()/100
         if self.overlay._visible and not self.capture_excluded and probe is None:
@@ -103,6 +106,7 @@ class LiveController(base.LiveController):
         manual = self.roi is not None
         burst = time.monotonic() < self.burst_until
         last=self.view_cache
+        anchors=dict(getattr(self,'view_anchors',{}))
         if (manual or not self.valid_visit(last,dict(game=game,roi=roi),300)
                 or not last.get('selected_floor')):last=None
         layout=self.app.layout_limit.get();floor_limit=self.app.floor_limit.get()
@@ -130,11 +134,13 @@ class LiveController(base.LiveController):
                 positive_at=time.monotonic()
                 stationary = bool(probe and presence['visible'] and probe.stationary(frame, opacity))
                 changing=bool(shown and floor!=shown.get('selected_floor'))
+                clear=None
                 if presence['visible'] and probe and (changing or not stationary):
                     frame=probe.uncovered_frame(frame)
+                    clear=probe.unpainted
                 sig=signature(frame) if presence['visible'] else None
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
-                    signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,
+                    signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,
                     at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
                 if stationary and last and floor==last['selected_floor'] and not changing:
                     point=self.matcher.handoffs.player_position(frame,last['floor'],last['matrix'])
@@ -144,14 +150,57 @@ class LiveController(base.LiveController):
                 if last and floor==last['selected_floor']:
                     moving=not stationary if probe else not same_view(sig,last['signature'])
                     origin=last.get('handoff_origin') if moving or last.get('provisional') else None
+                result=None
                 if (presence['visible'] and origin and floor and self.valid_visit(origin,sample,300) and
                         floor!=origin['selected_floor'] and floor_limit in ('自动',floor)
                         and layout in ('自动',origin['floor']['layout_id'][3:]) and not self.warming):
                     result=self.matcher.handoff(frame,origin,floor)
-                    if result:
-                        pixels=self.matcher.render_live(result,frame,style)
-                        result['layer_probe']=LayerProbe(frame,pixels,sig,result.get('label_tiles',()))
-                        sample['handoff']=(result,pixels,style,time.monotonic()-positive_at)
+                track=(presence['visible'] and last and floor and not self.warming and
+                       floor_limit in ('自动',floor) and layout in ('自动',last['floor']['layout_id'][3:]) and
+                       (floor!=last['selected_floor'] or (not stationary if probe else not same_view(sig,last['signature']))))
+                if track and not result:
+                    features=ViewFeatures(frame,map_area,clear)
+                    sample['view_features']=features
+                    fid=last['floor']['layout_id']+'_'+floor
+                    allowed=[v for v in anchors.get(fid,()) if self.valid_visit(v,sample,300)]
+                    source=next((v for v in anchors.get(last['floor']['id'],()) if self.valid_visit(v,sample,300)),None)
+                    result=self.matcher.follow_known(features,last,floor,allowed,frame,source)
+                if result:
+                    pixels=self.matcher.render_live(result,frame,style)
+                    result['layer_probe']=LayerProbe(frame,pixels,sig,result.get('label_tiles',()),clear)
+                    result['view_features']=sample.get('view_features') or ViewFeatures(frame,map_area,clear)
+                    # Rendering at desktop resolution can exceed the freshness
+                    # limit. Re-read the game instead of dropping an otherwise
+                    # valid new-floor result every time this happens.
+                    if time.monotonic()-positive_at>.20:
+                        if base.foreground()!=game.hwnd:
+                            self.events.put(('sample_discard',None));return
+                        fresh=base.capture(roi)
+                        check=self.visibility.inspect(fresh,fast=True)
+                        new_floor=selected_floor(fresh)
+                        checked=time.monotonic()
+                        if probe:
+                            fresh=probe.uncovered_frame(fresh)
+                            clear=probe.unpainted
+                            sample['clear_mask']=clear
+                        new_sig=signature(fresh) if check['visible'] else None
+                        sample.update(frame=fresh,presence=check,selected_floor=new_floor,signature=new_sig,
+                                      checked_at=checked,stationary=False)
+                        sample.pop('view_features',None);sample.pop('player_update',None)
+                        if not check['visible'] or floor!=new_floor:result=None
+                        elif not (np.array_equal(sig,new_sig) or same_view(sig,new_sig)):
+                            now_features=ViewFeatures(fresh,map_area,clear)
+                            moved=result['view_features'].motion_to(now_features)
+                            if moved is None:result=None
+                            else:
+                                result['matrix']=moved[0]@np.vstack((result['matrix'],[0,0,1]))
+                                for row in result.get('common_floors',()):
+                                    row['matrix']=moved[0]@np.vstack((row['matrix'],[0,0,1]))
+                                result['scale']=float(np.linalg.norm(result['matrix'][0,:2]))
+                                result['view_features']=now_features
+                                pixels=self.matcher.render_live(result,fresh,style)
+                                result['layer_probe']=LayerProbe(fresh,pixels,new_sig,result.get('label_tiles',()),clear)
+                    if result:sample['handoff']=(result,pixels,style,time.monotonic()-positive_at)
                 self.events.put(('sample',sample))
             except Exception as exc:
                 self.events.put(('sample_error', str(exc)))
@@ -242,6 +291,7 @@ class LiveController(base.LiveController):
             if self.display and self.overlay and self.overlay._visible:
                 since=self.display.setdefault('unsteady_since',now)
                 if now-since>.4:
+                    self.note('view_lost','地图仍展开，正在寻找可对齐的固定墙线。',selected_floor=sample.get('selected_floor'))
                     self.overlay.hide();self.display=None
             self.pending = sample  # Bounded latest-positive slot, never an unbounded frame queue.
             self.start_match()
@@ -259,7 +309,7 @@ class LiveController(base.LiveController):
         area = map_area(thumb) > 0
         delta = np.abs(thumb.astype(np.int16)-cached['thumb'].astype(np.int16))
         if float(delta[area].mean()) > 2.0 or float(np.mean(np.max(delta, axis=2)[area] > 18)) > .02:
-            return False
+            if not cached['probe'].stationary(sample['frame'],self.app.overlay_alpha.get()/100):return False
         self.display = dict(signature=sample['signature'], rendered=cached['rendered'],
                             roi=sample['roi'], epoch=self.generation, game=sample['game'],
                             selected_floor=sample.get('selected_floor'), label=cached.get('label'),
@@ -326,7 +376,9 @@ class LiveController(base.LiveController):
                 if result['accepted']:
                     guard()
                     rendered = self.matcher.render_live(result, sample['frame'], style, sample['manual'])
-                    result['layer_probe'] = LayerProbe(sample['frame'],rendered,sample['signature'],result.get('label_tiles',()))
+                    result['layer_probe'] = LayerProbe(sample['frame'],rendered,sample['signature'],result.get('label_tiles',()),sample.get('clear_mask'))
+                    if observed and not sample['manual']:
+                        result['view_features']=sample.get('view_features') or ViewFeatures(sample['frame'],map_area,sample.get('clear_mask'))
                 self.events.put(('matched', (sample, result, rendered, style, time.monotonic()-began)))
             except FloorChanged:
                 self.events.put(('search_superseded',None))
@@ -361,6 +413,7 @@ class LiveController(base.LiveController):
             if (not self.valid_visit(self.view_cache,sample,300) or
                     self.view_cache['floor']['layout_id'] not in alternatives):
                 self.floor_visits.clear()
+                self.view_anchors={}
             self.floor_cache, self.cache_identity = result['floor'], (game.hwnd, game.pid)
             self.scale_hint = float(result.get('scale', np.linalg.norm(result['matrix'][0,:2])))
             probe = result.get('layer_probe') or LayerProbe(sample['frame'],rendered,sample['signature'])
@@ -378,12 +431,27 @@ class LiveController(base.LiveController):
                 self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])
             if sample.get('selected_floor') == result['floor']['floor']:
                 self.floor_visits[sample['selected_floor']] = self.view_cache
+                features=result.get('view_features')
+                if features is not None and len(alternatives)==1 and not result.get('provisional'):
+                    fid=result['floor']['id']
+                    anchor={k:self.view_cache[k] for k in ('game','revision','roi','at','matrix','handoff_origin')}
+                    anchor['view_features']=features
+                    existing=self.view_anchors.get(fid,())
+                    # Reopens of the same room should not evict the other
+                    # observed variants that can be used to reacquire later.
+                    thumb=cv2.resize(features.geom,(40,24),interpolation=cv2.INTER_NEAREST)
+                    anchor['shape']=thumb
+                    def distinct(old):
+                        other=old['shape'];union=np.count_nonzero((thumb>0)|(other>0))
+                        return (np.max(np.abs(anchor['matrix']-old['matrix']))>14 or
+                                np.count_nonzero(thumb!=other)>.18*max(union,1))
+                    self.view_anchors[fid]=(anchor,*[v for v in existing if distinct(v)][:5])
             self.note('common_floor' if result.get('common_floors') else 'layout_learned', layout=result['floor']['id'], possible_layouts=alternatives, elapsed=elapsed,
                       inliers=result['inliers'], capture_epoch=sample['epoch'])
             current = self.latest
             if (sample['epoch'] == self.generation and current and current['presence']['visible'] and
                     current['game'] == game and current['roi'] == sample['roi'] and
-                    time.monotonic()-current['at'] < .30 and
+                    time.monotonic()-current.get('checked_at',current['at']) < .30 and
                     (current is sample or same_view(current['signature'], sample['signature'])) and base.foreground() == game.hwnd):
                 self.locked_match = result
                 self.display = dict(signature=sample['signature'], rendered=rendered, roi=sample['roi'],
@@ -417,6 +485,7 @@ class LiveController(base.LiveController):
             self.overlay.label_tiles=d['probe'].label_tiles
             self.overlay.show_image(d['rendered'], d['roi'], image_is_rgb=False)
             d['uploaded'] = True
+        self.painted=d
         if not self.overlay._native_layered_enabled: self.capture_excluded = False
         if self.overlay._visible and d.get('label') and not d.get('reported'):
             d['reported']=True

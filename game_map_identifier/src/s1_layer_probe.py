@@ -7,10 +7,11 @@ import cv2
 import numpy as np
 from copy import copy
 from .s1_alignment import geometry
+from .s1_live_match import map_area
 
 
 class LayerProbe:
-    def __init__(self, clean, rendered, signature, label_tiles=()):
+    def __init__(self, clean, rendered, signature, label_tiles=(),known_pixels=None):
         self.size = (signature.shape[1], signature.shape[0])
         self.clean = cv2.resize(clean,self.size).astype(np.float32)
         opaque = cv2.bitwise_not(cv2.inRange(rendered,(0,0,0),(16,16,16)))
@@ -27,6 +28,9 @@ class LayerProbe:
             cv2.rectangle(self.label_area,(int(x*sx)-1,int(y*sy)-1),
                           (int((x+w)*sx)+1,int((y+h)*sy)+1),255,-1)
         self.area=(cv2.dilate(signature,np.ones((13,13),np.uint8))>0) & (self.label_area==0)
+        self.rooms=signature>0
+        self.known=(cv2.resize(known_pixels,self.size,interpolation=cv2.INTER_AREA)>=252) if known_pixels is not None else np.ones(signature.shape,bool)
+        self.area &= self.known
         self.update_edges()
 
     def update_edges(self):
@@ -45,6 +49,8 @@ class LayerProbe:
         result = copy(self)
         result.clean = cv2.resize(clean,self.size).astype(np.float32)
         result.area = (cv2.dilate(signature,np.ones((13,13),np.uint8)) > 0) & (self.label_area==0)
+        result.rooms=signature>0
+        result.known=np.ones(signature.shape,bool)
         result.update_edges()
         return result
 
@@ -52,6 +58,11 @@ class LayerProbe:
         if np.count_nonzero(self.area) < 60:
             return False
         raw = cv2.resize(frame,self.size).astype(np.float32)
+        hsv=cv2.cvtColor(raw.astype(np.uint8),cv2.COLOR_BGR2HSV)
+        rooms=cv2.inRange(hsv,(4,25,45),(33,200,255))>0
+        clear=self.known&(self.coverage[:,:,0]<.02)&(self.label_area==0)&(map_area(hsv)>0)
+        if np.count_nonzero(rooms & ~self.rooms & clear)>max(40,self.rooms.sum()*.055):
+            return False
         a = round(max(.15,min(.90,alpha))*255)/255
         transmitted = 1-self.coverage*a
         restored = np.clip((raw-self.ink*a)/transmitted,0,255)
