@@ -84,21 +84,37 @@ class LiveMatcher(FloorMatcher):
             hit['passage'] = '锁定布局·负三墙线'
         return hit
 
+    @staticmethod
+    def follow_anchors(features,floor,anchors):
+        for anchor in anchors:
+            relative=anchor['view_features'].motion_to(features)
+            if relative is None:continue
+            change,count,agreement=relative
+            if abs(change[0,0]-1)>.06 and len(anchors)>1:
+                # Correct accumulated scale error against an independently registered,
+                # more detailed view if the current map still overlaps it.
+                reference=max((v for v in anchors if v.get('independent') or v.get('result')),
+                              key=lambda v:v['matrix'][0,0],default=None)
+                if reference is not None and reference['matrix'][0,0]>anchor['matrix'][0,0]*1.25:
+                    direct=reference['view_features'].motion_to(features)
+                    if direct is not None:
+                        change,count,agreement=direct
+                        anchor=reference
+            mat=change@np.vstack((anchor['matrix'],[0,0,1]))
+            return dict(accepted=True,floor=floor,matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
+                        inliers=count,score=agreement,consistency=agreement,error_px=None,
+                        possible_layouts=[floor['layout_id']],candidates=[],segmentation='view_motion',
+                        search='view_zoom' if abs(change[0,0]-1)>.06 else 'view_motion',handoff_origin=anchor.get('handoff_origin'))
+        return None
+
     def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None,locked_layout=None):
         """Reuse a measured view of this floor, including one seen before a close."""
         if not prior.get('unique_layout') or prior.get('provisional'):return None
         layout=prior['floor']['layout_id']
         floor=self.handoffs.floors.get(layout+'_'+target)
         if floor is None:return None
-        for anchor in anchors:
-            relative=anchor['view_features'].motion_to(features)
-            if relative is None:continue
-            change,count,agreement=relative
-            mat=change@np.vstack((anchor['matrix'],[0,0,1]))
-            return dict(accepted=True,floor=floor,matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
-                        inliers=count,score=agreement,consistency=agreement,error_px=None,
-                        possible_layouts=[layout],candidates=[],segmentation='view_motion',
-                        search='view_motion',handoff_origin=anchor.get('handoff_origin'))
+        tracked=self.follow_anchors(features,floor,anchors)
+        if tracked is not None:return tracked
         predicted,_=self.coordinates.predict(prior,target)
         if predicted is None:return None
         scale=float(np.linalg.norm(predicted[0,:2]))
@@ -150,6 +166,8 @@ class LiveMatcher(FloorMatcher):
         for width in (960,800):
             hit=self.entrances.locate(image,map_area,None,width)
             if hit is not None:return hit
+        compact=self.entrances.compact(image,map_area)
+        if compact is not None:return compact
         hit=self._locate_live(image,None,'B1',1280,1024)
         # Feature matching may find several equivalent layouts without
         # registering each row for a consensus overlay.

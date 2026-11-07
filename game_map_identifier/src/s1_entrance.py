@@ -80,6 +80,32 @@ class EntranceMatcher:
                              consistency=agreement,inliers=model['inliers'],error_px=None))
         return rows
 
+    def compact(self,image,area):
+        # Restore the pixel span of a zoomed-out entrance without enlarging the
+        # HUD or the entire capture. All B1 layouts remain independent candidates.
+        factor=min(1.,720/image.shape[1])
+        small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
+        mask=geometry(small)&area(small)
+        _,_,stats,_=cv2.connectedComponentsWithStats(np.uint8(mask>0))
+        if len(stats)<2:return None
+        x,y,w,h,n=stats[1+int(np.argmax(stats[1:,4]))]
+        if n<45 or min(w,h)<5 or max(w,h)>200:return None
+        l,t=np.maximum(0,np.floor((np.array([x,y])-4)/factor).astype(int))
+        right,bottom=np.minimum(image.shape[1::-1],np.ceil((np.array([x+w,y+h])+4)/factor).astype(int))
+        crop=image[t:bottom,l:right]
+        size=tuple(np.maximum(1,np.rint(np.array(crop.shape[1::-1])*320/max(crop.shape[:2])).astype(int)))
+        local=cv2.resize(crop,size,interpolation=cv2.INTER_LINEAR)
+        valid=cv2.resize(area(image)[t:bottom,l:right],size,interpolation=cv2.INTER_NEAREST)
+        hit=self.locate(local,lambda _:valid)
+        if hit is None:return None
+        resize=np.array(crop.shape[1::-1])/size
+        for row in [hit,*hit.get('common_floors',())]:
+            mat=resize[:,None]*row['matrix']
+            mat[:,2]+=[l,t]
+            row.update(matrix=mat,scale=float(np.linalg.norm(mat[0,:2])))
+        hit['search']='entrance_compact'
+        return hit
+
     def locate(self,image,area,layout=None,width=960):
         factor=min(1.,width/image.shape[1])
         small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)

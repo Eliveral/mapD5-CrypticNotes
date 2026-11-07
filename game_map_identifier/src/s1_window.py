@@ -24,7 +24,7 @@ class S1Window(tk.Tk):
     def __init__(self, autostart=True, controls=True, start_hidden=False):
         super().__init__()
         if start_hidden:self.withdraw()
-        self.title('MapD5 · 加页手记地图助手 3.7.8')
+        self.title('MapD5 · 加页手记地图助手 3.7.9')
         self.geometry('1100x760'); self.minsize(780,540); self.configure(bg=BG)
         self.reload_maps=False;self.resume_detection=autostart
         self.catalog=S1Catalog(map_root(project_root()))
@@ -48,7 +48,7 @@ class S1Window(tk.Tk):
         head=tk.Frame(self,bg=BG);head.pack(fill='x',padx=18,pady=(15,8))
         tk.Label(head,text='加页手记',bg=BG,fg=FG,font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
         tk.Label(head,text='磷光症  /  S1 噩梦',bg=BG,fg=MUTED,font=('Microsoft YaHei UI',12)).pack(side='left',padx=14)
-        tk.Label(head,text='MapD5  3.7.8',bg=BG,fg=MUTED).pack(side='right')
+        tk.Label(head,text='MapD5  3.7.9',bg=BG,fg=MUTED).pack(side='right')
         primary=tk.Frame(self,bg=PANEL);primary.pack(fill='x',padx=18,pady=(4,10))
         self.detect_button=tk.Button(primary,text='▶ 一键开启检测匹配',command=lambda:self.live.start(True),
             bg='#0f766e',fg='white',activebackground='#115e59',activeforeground='white',

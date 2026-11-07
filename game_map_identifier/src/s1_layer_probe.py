@@ -8,10 +8,12 @@ import numpy as np
 from copy import copy
 from .s1_alignment import geometry
 from .s1_live_match import map_area
+from .s1_view_motion import zoom_position,zoom_changed
 
 
 class LayerProbe:
     def __init__(self, clean, rendered, signature, label_tiles=(),known_pixels=None):
+        self.zoom=zoom_position(clean)
         self.size = (signature.shape[1], signature.shape[0])
         self.clean = cv2.resize(clean,self.size).astype(np.float32)
         opaque = cv2.bitwise_not(cv2.inRange(rendered,(0,0,0),(16,16,16)))
@@ -47,6 +49,7 @@ class LayerProbe:
         # The same rendered map has the same ink and coverage. On a verified
         # reopen only the tiny clean reference changes, never the full-size mask.
         result = copy(self)
+        result.zoom=zoom_position(clean)
         result.clean = cv2.resize(clean,self.size).astype(np.float32)
         result.area = (cv2.dilate(signature,np.ones((13,13),np.uint8)) > 0) & (self.label_area==0)
         result.rooms=signature>0
@@ -55,7 +58,7 @@ class LayerProbe:
         return result
 
     def stationary(self, frame, alpha):
-        if np.count_nonzero(self.area) < 60:
+        if zoom_changed(self.zoom,zoom_position(frame)) or np.count_nonzero(self.area) < 60:
             return False
         raw = cv2.resize(frame,self.size).astype(np.float32)
         hsv=cv2.cvtColor(raw.astype(np.uint8),cv2.COLOR_BGR2HSV)

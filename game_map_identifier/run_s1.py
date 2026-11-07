@@ -68,6 +68,9 @@ if __name__ == '__main__':
             r = matcher.locate_live(frame,lock.layout)
         if target_layout and r['accepted'] and (r['floor']['layout_id']!=target_layout or (lock.layout and r.get('provisional'))):
             r={'accepted':False}
+        if r['accepted'] and not lock.permits_overlay(r['floor']['floor'],r['floor']['layout_id'],
+                r.get('possible_layouts') or [r['floor']['layout_id']]):
+            r={'accepted':False}
         correction=None
         if r['accepted'] and '--pose-offset' in sys.argv and not r.get('common_floors'):
             i=sys.argv.index('--pose-offset')

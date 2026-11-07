@@ -255,6 +255,15 @@ class LiveController:
         self.history = self.history[-200:]
         try:
             self.diagnostics.mkdir(parents=True, exist_ok=True)
+            if state in ('round_locked','round_rechecking','round_corrected','round_reset','b2_conflict','pose_offset') or (
+                    state=='overlay_shown' and details.get('floor_id')):
+                # Keep the submitted floor and its lock together beyond the short
+                # screen-state buffer. Two bounded files, no images or input events.
+                trace=self.diagnostics/'overlay-history.jsonl'
+                if trace.is_file() and trace.stat().st_size>=512*1024:
+                    trace.replace(trace.with_suffix('.previous.jsonl'))
+                with trace.open('a',encoding='utf8') as stream:
+                    stream.write(json.dumps(record,ensure_ascii=False,separators=(',',':'))+'\n')
             tmp = self.diagnostics/'state.tmp'
             tmp.write_text(json.dumps(dict(current=record, events=self.history), ensure_ascii=False, indent=2), encoding='utf-8')
             tmp.replace(self.diagnostics/'state.json')

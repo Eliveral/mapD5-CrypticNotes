@@ -27,6 +27,15 @@ class RoundLock:
         if self.b1_conflict:return None
         return self.layout
 
+    def permits_overlay(self, level, layout, candidates):
+        if level=='B1':
+            # Independent B1 recognition can dispute a stale lock. Until B2
+            # decides, only a common region including the lock can be drawn.
+            return not self.layout or self.layout in candidates
+        if self.uncertain or self.challenger or self.b1_conflict:
+            return False
+        return not self.layout or (layout==self.layout and all(v==self.layout for v in candidates))
+
     def observe(self,reference):
         if not reference:return False
         if reference['floor']['floor']!='B2' or not reference.get('unique_layout') or reference.get('provisional'):
