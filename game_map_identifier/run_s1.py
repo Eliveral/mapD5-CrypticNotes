@@ -20,10 +20,17 @@ if __name__ == '__main__':
         presence=MapVisibility(c.root/'ui').inspect(frame)
         selected = selected_floor(frame) if presence['visible'] else None
         matcher = LiveMatcher(c)
+        prior=None
+        if '--prior-capture' in sys.argv:
+            prior_image=read_image(Path(sys.argv[sys.argv.index('--prior-capture')+1]))
+            prior_level=selected_floor(prior_image)
+            if prior_level and MapVisibility(c.root/'ui').inspect(prior_image)['visible']:
+                previous=matcher.locate_selected(prior_image,None,prior_level)
+                if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:prior=previous
         if not presence['visible']:
             r = {'accepted':False}
         elif selected:
-            r = matcher.locate_selected(frame, None, selected)
+            r = matcher.locate_selected(frame, None, selected,visit=prior)
         else:
             r = matcher.locate_live(frame)
         rendered = matcher.render_live(r,frame) if r['accepted'] else None
@@ -31,6 +38,7 @@ if __name__ == '__main__':
                 'selected_floor':selected, 'method':r.get('segmentation'),
                 'display_source':r.get('display_source'),
                 'possible_layouts':r.get('possible_layouts',[]),'common_only':bool(r.get('common_floors')),
+                'prior_floor':prior['floor']['id'] if prior else None,'search':r.get('search'),
                 'render_sha256':hashlib.sha256(rendered.tobytes()).hexdigest() if rendered is not None else None,
                 'floor':r.get('floor',{}).get('id'),'inliers':r.get('inliers'),
                 'matrix':r['matrix'].tolist() if r['accepted'] else None,

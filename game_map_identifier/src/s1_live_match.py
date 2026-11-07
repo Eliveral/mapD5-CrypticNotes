@@ -7,6 +7,7 @@ from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
 from .s1_entrance import EntranceMatcher
+from .s1_station import StationMatcher
 
 
 def map_area(image):
@@ -107,6 +108,16 @@ class LiveMatcher(FloorMatcher):
                 prior = predicted*factor if predicted is not None and candidate==preferred else None
                 result = self.corridors.locate(geom, candidate, floor_name, native_scale*factor,
                                                quick=True, predicted=prior)
+                if result is None and candidate==preferred and floor_name=='B3':
+                    if not hasattr(self,'room_labels'):self.room_labels=RoomLabels(self.catalog)
+                    if not hasattr(self,'stations'):self.stations=StationMatcher(self)
+                    target=next(f for f in self.floors if f['layout_id']==preferred and f['floor']=='B3')
+                    xy=self.room_labels.points.get(target['id'],{}).get('supply')
+                    if xy:
+                        anchor=np.asarray(self.room_labels.hd_matrices[target['id']]) @ [*xy,1]
+                        station,incomplete=self.stations.locate(image,map_area,target,native_scale,anchor)
+                        if station is not None:return station
+                        if incomplete:return dict(accepted=False,candidates=[],reason='当前仅露出一处墙角，需要再显示一段负三走廊。')
                 zoomed = False
                 if result is None and candidate == preferred:
                     result = self.corridors.locate(geom,candidate,floor_name,native_scale*factor,
