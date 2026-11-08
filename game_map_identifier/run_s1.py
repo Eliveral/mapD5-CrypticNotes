@@ -34,17 +34,23 @@ if __name__ == '__main__':
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         for i,arg in enumerate(sys.argv):
+            if arg=='--enter-floor':
+                level=sys.argv[i+1]
+                if level=='B2':lock.enter_b2(i,True,prior_level if prior else None)
+                elif level=='B3':lock.enter_b3(i,True)
+                else:raise ValueError('回放落点须为 B2 或 B3')
+                continue
             if arg=='--landing-frame':
                 image=read_image(Path(sys.argv[i+1]))
                 if selected_floor(image)=='B3' and MapVisibility(c.root/'ui').inspect(image)['visible']:
                     base=None if lock.blocks_floor('B2') else lock.layout
-                    hit=matcher.review_landing(image,incumbent=lock.landing.layout or base)
+                    hit=matcher.review_landing(image,incumbent=lock.landing.layout or base,pending=lock.landing.pending)
                     if hit:lock.observe_landing(dict(hit,at=i))
                 continue
             if arg!='--confirm-b2':continue
             image=read_image(Path(sys.argv[i+1]))
             if selected_floor(image)!='B2' or not MapVisibility(c.root/'ui').inspect(image)['visible']:continue
-            proof=matcher.confirm_b2(image,incumbent=lock.layout)
+            proof=matcher.confirm_b2(image,incumbent=lock.layout,entry=lock.b2_arrival or lock.recheck_b2_after_landing)
             if proof:
                 proof.update(at=i,unique_layout=True,player_hd=matcher.handoffs.player_position(image,proof['floor'],proof['matrix']))
                 if lock.observe(proof):
@@ -52,21 +58,24 @@ if __name__ == '__main__':
         landing_pose=None
         if presence['visible'] and selected=='B3':
             base=None if lock.blocks_floor('B2') else lock.layout
-            current=matcher.review_landing(frame,incumbent=lock.landing.layout or base)
+            current=matcher.review_landing(frame,incumbent=lock.landing.layout or base,pending=lock.landing.pending)
             if current:
                 lock.observe_landing(dict(current,at=len(sys.argv)))
                 if lock.permits_overlay('B3',current['floor']['layout_id'],current['possible_layouts']):
                     landing_pose=current
-        if presence['visible'] and selected=='B2' and lock.recheck_b2_after_landing:
-            proof=matcher.confirm_b2(frame,incumbent=lock.layout)
-            if proof:lock.observe(dict(proof,at=len(sys.argv),unique_layout=True))
+        if presence['visible'] and selected=='B2' and (lock.recheck_b2_after_landing or lock.b2_arrival):
+            proof=matcher.confirm_b2(frame,incumbent=lock.layout,entry=True)
+            if proof:
+                lock.observe(dict(proof,at=len(sys.argv),unique_layout=True))
+                if lock.permits_overlay('B2',proof['floor']['layout_id'],proof['possible_layouts']):
+                    landing_pose=proof
         target_layout=lock.preferred(selected)
         if prior and selected=='B3' and target_layout and prior['floor']['layout_id']!=target_layout:prior=None
         if not presence['visible']:
             r = {'accepted':False}
         elif selected=='B1':
             r=matcher.review_b1(frame) or {'accepted':False}
-        elif selected and selected not in ('B1','B2','B3'):
+        elif selected not in ('B1','B2','B3'):
             r={'accepted':False}
         elif lock.blocks_floor(selected):
             r={'accepted':False}
@@ -106,6 +115,7 @@ if __name__ == '__main__':
                 'selected_floor':selected, 'method':r.get('segmentation'),
                 'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
                 'b3_local':lock.landing.layout,'b3_pending':lock.landing.pending,
+                'waiting_b2':lock.b2_arrival,'waiting_b3':lock.landing.waiting,
                 'pose_adjustment':correction and correction['adjustment'],
                 'wall_error_before_px':correction and correction['before_px'],
                 'wall_error_after_px':correction and correction['after_px'],

@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import json
 from .s1_passage_data import PASSAGES
+from .s1_floor_buttons import selected_floor
 
 
 class FloorCoordinates:
@@ -63,31 +64,6 @@ class FloorCoordinates:
         translate = np.eye(3); translate[:2,2] = -offset
         predicted = np.vstack([matrix,[0,0,1]]) @ prev @ translate @ np.linalg.inv(nxt)
         return predicted[:2], 'atlas_relation'
-
-
-def selected_floor(image):
-    height, width = image.shape[:2]
-    center = width - round(.22 * height)
-    if center < 0 or height < 240:
-        return None
-    votes = []
-    # Sample the panel on either side of the number, outside the glyph.
-    for offset in (-.014, .014):
-        x = center + round(offset * height)
-        scores = []
-        for y_fraction in (.180, .259, .340, .420):
-            y = round(height * y_fraction)
-            radius = max(2, round(.005 * height))
-            patch = image[y-radius:y+radius, x-radius:x+radius]
-            if not patch.size:
-                return None
-            scores.append(float(np.median(patch[:, :, 0])))
-        order = np.argsort(scores)
-        top, second = int(order[-1]), int(order[-2])
-        if scores[top] - scores[second] < 18 or scores[top] < 1.35 * scores[second]:
-            return None
-        votes.append(top)
-    return f'B{votes[0]+1}' if votes[0] == votes[1] else None
 
 
 class CorridorMatcher:

@@ -5,7 +5,7 @@ from .s1_view_motion import ViewFeatures
 from .s1_entrance import turns
 
 
-def compare_walls(matcher,image,area,clear,full=None,level='B2'):
+def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None):
     features=ViewFeatures(image,area,clear)
     g=features.geom
     _,_,stats,centers=cv2.connectedComponentsWithStats(np.uint8(g==127))
@@ -38,7 +38,13 @@ def compare_walls(matcher,image,area,clear,full=None,level='B2'):
     score={h['floor']['layout_id']:h['inliers'] for h in rows}
     best=rows[0];n=best['inliers']
     rival=max(best['rival'],rows[1]['inliers'] if len(rows)>1 else 0)
-    if n<max(10,len(corners)*.27) or n-rival<max(3,n*.20) or best['consistency']<.90:return None,score
+    if n<max(10,len(corners)*.27) or best['consistency']<.90 or n-rival<max(3,n*.20):
+        # Several distributed alternatives can disprove an incumbent even
+        # though they cannot yet identify a unique replacement.
+        if (incumbent and n>=max(14,len(corners)*.15) and best['consistency']>=.88 and score.get(incumbent,0)<n*.55 and
+                sum(v>=max(10,n*.70) for k,v in score.items() if k!=incumbent)>=2):
+            best['conflicting_models']=True
+        else:return None,score
     method=level.lower()+'_wall_review'
     best.update(search=method,segmentation=method,proof_kind='partial')
     return best,score

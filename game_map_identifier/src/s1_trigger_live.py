@@ -39,6 +39,7 @@ class LiveController(base.LiveController):
         self.proof_due=0.
         self.landing_job=None
         self.landing_due=0.
+        self.queued_b2=self.queued_b3=None
         self.session_revision = 0
         self.cache_identity = None
         self.last_note_state = None
@@ -83,6 +84,7 @@ class LiveController(base.LiveController):
         self.view_anchors={}
         self.pose_task=None
         self.landing_job=None;self.landing_due=0.
+        self.queued_b2=self.queued_b3=None
         self.pose_due={}
         self.pose_fixes={}
         self.b1_due=0.
@@ -176,19 +178,23 @@ class LiveController(base.LiveController):
         return hit
 
     def begin_proof(self,sample):
-        if ('b2_pixels' not in sample or self.proof_job or
-                self.app.layout_limit.get()!='自动' or sample['at']<self.proof_due):return
+        if 'b2_pixels' not in sample or self.app.layout_limit.get()!='自动':return
+        if self.proof_job:
+            self.queued_b2=sample
+            return
+        if sample['at']<self.proof_due:return
         state=self.round_lock
         token=object()
         self.proof_job=token
         incumbent=state.layout
         interval=.25 if state.blocks_floor('B2') else 2.5 if incumbent else .65
         self.proof_due=sample['at']+interval
+        entry=state.b2_arrival or state.recheck_b2_after_landing
         def verify():
             reference=None
             try:
                 frame,clear=sample['b2_pixels']
-                hit=self.matcher.confirm_b2(frame,clear,incumbent)
+                hit=self.matcher.confirm_b2(frame,clear,incumbent,entry=entry)
                 if hit:
                     reference={k:sample[k] for k in ('at','revision','game','roi')}
                     reference.update(floor=hit['floor'],matrix=hit['matrix'],selected_floor='B2',
@@ -205,7 +211,11 @@ class LiveController(base.LiveController):
         threading.Thread(target=verify,daemon=True).start()
 
     def begin_landing(self,sample):
-        if 'b3_pixels' not in sample or getattr(self,'landing_job',None) or sample['at']<getattr(self,'landing_due',0.):return
+        if 'b3_pixels' not in sample or self.app.layout_limit.get()!='自动':return
+        if getattr(self,'landing_job',None):
+            self.queued_b3=sample
+            return
+        if sample['at']<getattr(self,'landing_due',0.):return
         review=self.round_lock.landing
         token=object();self.landing_job=token
         self.landing_due=sample['at']+(.4 if review.pending else 4.)
@@ -214,11 +224,11 @@ class LiveController(base.LiveController):
             ref=None
             try:
                 image,clear=sample['b3_pixels']
-                hit=self.matcher.review_landing(image,clear,incumbent)
+                hit=self.matcher.review_landing(image,clear,incumbent,pending=review.pending)
                 if hit:
                     ref={key:sample[key] for key in ('game','revision','roi','at')}
                     ref.update(floor=hit['floor'],selected_floor='B3',unique_layout=True,result=hit,
-                               matrix=hit['matrix'],cells=hit['cells'],signature=signature(image),
+                               matrix=hit['matrix'],cells=hit['cells'],disjoint_proof=hit.get('disjoint_proof',False),conflicting_models=hit.get('conflicting_models',False),signature=signature(image),
                                view_features=ViewFeatures(image,map_area,clear))
             except Exception as exc:self.events.put(('landing_error',str(exc)))
             finally:self.events.put(('landing_checked',(review,token,ref)))
@@ -226,11 +236,34 @@ class LiveController(base.LiveController):
 
     def landing_checked(self,review,token,ref):
         if token is not self.landing_job:return
+        queued=getattr(self,'queued_b3',None);self.queued_b3=None
+        self._apply_landing(review,token,ref)
+        if (queued and self.active and queued['game']==self.game and queued['revision']==self.session_revision
+                and queued['at']>=self.round_lock.landing.since):
+            self.begin_landing(queued)
+
+    def needs_pose_update(self,ref):
+        visit=self.view_cache
+        if not visit or visit['floor']['id']!=ref['floor']['id']:return False
+        if ref['at']<visit.get('sample_at',0) and not same_view(ref['signature'],visit['signature']):return False
+        old=visit['matrix'];fresh=ref['matrix'];h,w=ref['game'].bounds[3],ref['game'].bounds[2]
+        probes=np.float64([[w*.35,h*.3,1],[w*.7,h*.65,1],[w*.55,h*.45,1]]).T
+        delta=(fresh-old)@np.linalg.inv(np.vstack((old,[0,0,1])))@probes
+        return float(np.max(np.linalg.norm(delta,axis=0)))>max(4.,h*.004)
+
+    def _apply_landing(self,review,token,ref):
+        if token is not self.landing_job:return
         self.landing_job=None
         if (review is not self.round_lock.landing or not ref or not self.active or
                 self.app.layout_limit.get()!='自动' or ref['revision']!=self.session_revision or
                 ref['game']!=self.game):return
-        if not self.round_lock.observe_landing(ref):return
+        if ref['at']<review.since or ref['at']<=review.at:return
+        if not self.round_lock.observe_landing(ref):
+            if (not self.round_lock.blocks_floor('B3') and not ref.get('conflicting_models') and
+                    self.round_lock.preferred('B3')==ref['floor']['layout_id'] and self.needs_pose_update(ref)):
+                self.pose_fixes[ref['floor']['id']]=ref
+                self.due=0.
+            return
         if self.round_lock.recheck_b2_after_landing:self.proof_due=0.
         self.app.round_status.set(self.round_lock.status())
         # Drop only B3 projection state. A new landing does not relabel B2.
@@ -243,24 +276,32 @@ class LiveController(base.LiveController):
             self.display=None
             if self.overlay and self.overlay._visible:self.overlay.hide()
         self.pending=None;self.due=0.
-        if review.pending:
+        if review.pending or review.waiting:
             self.landing_due=0.
         else:
             self.pose_fixes[ref['floor']['id']]=ref
-        self.note('landing_rechecking' if review.pending else 'landing_confirmed',self.round_lock.status(),
+        self.note('landing_rechecking' if review.pending or review.waiting else 'landing_confirmed',self.round_lock.status(),
                   floor_id=ref['floor']['id'],selected_floor='B3',inliers=ref['result']['inliers'])
 
     def proof_received(self,state,token,reference):
         if token is not self.proof_job:return
+        queued=getattr(self,'queued_b2',None);self.queued_b2=None
+        self._apply_proof(state,token,reference)
+        if (queued and state is self.round_lock and self.active and queued['game']==self.game
+                and queued['revision']==self.session_revision and queued['at']>=state.b2_since):
+            self.begin_proof(queued)
+
+    def _apply_proof(self,state,token,reference):
+        if token is not self.proof_job:return
         self.proof_job=None
         previous=state.layout
         old_b2=state.preferred('B2')
-        if (state is not self.round_lock or not reference or not self.active or
+        if (state is not self.round_lock or not reference or reference['at']<state.b2_since or not self.active or
                 reference['revision']!=self.session_revision or reference['game']!=self.game or
                 self.app.layout_limit.get()!='自动'):return
         changed=state.observe(reference)
         needs_pose=(not self.display or self.display.get('selected_floor')!='B2' or
-                    not self.view_cache or self.view_cache['floor']['id']!=reference['floor']['id'])
+                    not self.view_cache or self.view_cache['floor']['id']!=reference['floor']['id'] or self.needs_pose_update(reference))
         if not changed and (not needs_pose or state.uncertain or
                 state.preferred('B2')!=reference['floor']['layout_id']):return
         self.app.round_status.set(state.status())
@@ -296,6 +337,7 @@ class LiveController(base.LiveController):
             self.display=self.pending=None
             if self.overlay and self.overlay._visible:self.overlay.hide()
         if state.layout and state.layout!=previous:
+            self.landing_due=0.
             threading.Thread(target=self.matcher.prepare_paired_floor,args=(state.layout,),daemon=True).start()
         event=('round_rechecking' if state.challenger else 'round_corrected' if previous and previous!=state.layout
                else 'round_locked' if state.layout else 'round_confirming')
@@ -316,6 +358,28 @@ class LiveController(base.LiveController):
         self.due = 0  # No 320 ms animation wait, and never count toggle parity.
         self.note('map_key' if action == 'map' else 'escape_key',
                   '已收到地图键：立即连续抓图…' if action == 'map' else '已隐藏覆盖，正在确认地图关闭。')
+
+    def same_verified_view(self,ref,sample):
+        if not self.valid_visit(ref,sample,120) or not same_view(ref['signature'],sample['signature']):return False
+        features=ref.get('view_features')
+        if not features or zoom_changed(features.zoom,sample.get('zoom')) or sample.get('probing'):return False
+        gray=cv2.cvtColor(cv2.resize(sample['frame'],features.gray.shape[1::-1],interpolation=cv2.INTER_AREA),cv2.COLOR_BGR2GRAY)
+        known=(features.geom>0)&(features.valid>0)
+        if known.sum()<100:return False
+        delta=cv2.absdiff(gray,features.gray)[known]
+        return float(delta.mean())<4 and float(np.mean(delta>15))<.06
+
+    def lost_explored_area(self,ref,sample):
+        if not self.valid_visit(ref,sample,300) or not ref.get('view_features'):return False
+        if zoom_changed(ref['view_features'].zoom,sample.get('zoom')):return False
+        old=ref['signature']>0;new=sample['signature']>0
+        clear=sample.get('clear_mask')
+        probe=sample.get('observed_probe')
+        if clear is None and probe is not None:clear=probe.unpainted
+        if clear is not None:
+            valid=cv2.resize(clear,old.shape[1::-1],interpolation=cv2.INTER_AREA)>250
+            old=old&valid;new=new&valid
+        return old.sum()>120 and new.sum()<old.sum()*.38
 
     def launch(self):
         if not self.game or base.foreground() != self.game.hwnd: return
@@ -361,6 +425,9 @@ class LiveController(base.LiveController):
         style='structure' if self.app.overlay_style.get()=='结构' else 'original_clean'
         b1_due=self.b1_due
         self.sampling = True
+        seen=getattr(self,'seen_level',None)
+        prior_level=seen[1] if seen and seen[0]==revision else None
+        latest=self.latest
         last_hint=last
 
         def grab():
@@ -422,11 +489,27 @@ class LiveController(base.LiveController):
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
                     zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
                     at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
+                if automatic and not manual and presence['visible'] and floor in ('B2','B3'):
+                    cross=prior_level!=floor
+                    reopened=not latest or not latest['presence']['visible'] or latest.get('selected_floor')!=floor
+                    ref=self.round_lock.reference if floor=='B2' else landing.reference
+                    required=self.round_lock.b2_arrival if floor=='B2' else landing.waiting
+                    paired=(floor=='B3' and prior_level=='B2' and pair_locked and not self.round_lock.direct_b2
+                            and not self.round_lock.blocks_floor('B2'))
+                    entry=(cross and not paired) or (not cross and reopened and not self.same_verified_view(ref,sample))
+                    if not entry and not cross and not required:
+                        entry=self.lost_explored_area(ref,sample)
+                    if entry:
+                        sample['floor_entry']=(floor,cross,prior_level)
+                        sample['b2_pixels' if floor=='B2' else 'b3_pixels']=(
+                            (probe.uncovered_frame(frame),probe.unpainted) if probe and clear is None else (frame,clear))
+                        self.events.put(('sample',sample))
+                        return
                 if verify and presence['visible'] and floor=='B2':
                     sample['b2_pixels']=(probe.uncovered_frame(frame),probe.unpainted) if probe and clear is None else (frame,clear)
                 if verify_b3 and presence['visible'] and floor=='B3':
                     sample['b3_pixels']=(probe.uncovered_frame(frame),probe.unpainted) if probe and clear is None else (frame,clear)
-                if presence['visible'] and floor and floor not in ('B1','B2','B3'):
+                if presence['visible'] and not manual and floor not in ('B1','B2','B3'):
                     self.events.put(('sample',sample))
                     return
                 if presence['visible'] and floor in blocked:
@@ -543,32 +626,30 @@ class LiveController(base.LiveController):
             return
         level=sample.get('selected_floor')
         if sample['presence']['visible'] and level and not sample.get('manual'):
-            prior=getattr(self,'seen_level',None)
             self.seen_level=(self.session_revision,level)
-            if (level=='B3' and prior in ((self.session_revision,'B1'),(self.session_revision,'B4'))
-                    and self.app.layout_limit.get()=='自动'):
-                previous=self.round_lock.landing
-                self.generation+=1
-                sample['epoch']=self.generation
-                self.round_lock.landing=LandingReview()
-                self.round_lock.landing.layout=previous.layout
-                self.round_lock.landing.waiting=True
-                self.landing_job=None;self.landing_due=0.
+            if sample.get('floor_entry'):
+                _,cross,previous=sample['floor_entry']
+                self.generation+=1;sample['epoch']=self.generation
+                if level=='B2':
+                    self.round_lock.enter_b2(sample['at'],cross,previous)
+                    self.queued_b2=None;self.proof_due=0.
+                else:
+                    self.round_lock.enter_b3(sample['at'],cross)
+                    self.queued_b3=None;self.landing_due=0.
                 self.display=self.pending=None
                 if self.overlay and self.overlay._visible:self.overlay.hide()
-                if 'b3_pixels' not in sample:
-                    probe=sample.get('observed_probe');frame=sample['frame'];mask=sample.get('clear_mask')
-                    sample['b3_pixels']=(probe.uncovered_frame(frame),probe.unpainted) if probe and mask is None else (frame,mask)
-                self.note('landing_observed','当前楼层已改变，正在按落点墙线核对负三。',selected_floor=level)
+                self.note('landing_observed',f'正在按当前 {level} 落点独立核图。',selected_floor=level)
         if sample['presence']['visible'] and level=='B2':self.begin_proof(sample)
         if sample['presence']['visible'] and sample.get('selected_floor')=='B3':self.begin_landing(sample)
-        if sample['presence']['visible'] and sample.get('selected_floor') not in (None,'B1','B2','B3'):
+        if (sample['presence']['visible'] and not sample.get('manual') and 'selected_floor' in sample
+                and level not in ('B1','B2','B3')):
             if not self.latest or self.latest.get('selected_floor')!=level:
                 self.generation+=1
                 sample['epoch']=self.generation
             self.latest=sample;self.display=self.pending=None
             if self.overlay and self.overlay._visible:self.overlay.hide()
-            self.note('unsupported_floor','当前图库没有该层底图。',selected_floor=sample['selected_floor'])
+            self.note('unsupported_floor' if level else 'unreadable_floor',
+                      '当前图库没有该层底图。' if level else '等待楼层按钮数字清晰。',selected_floor=level)
             self.due=time.monotonic()+.06
             return
         if sample.get('b1_checked'):
@@ -839,7 +920,7 @@ class LiveController(base.LiveController):
                 self.pose_fixes.pop(fid,None)
                 self.view_anchors.pop(fid,None)
                 self.pose_due[fid]=time.monotonic()+.85
-            if fix and result.get('search') in ('wall_realign','b2_recheck'):
+            if fix and result.get('search') in ('wall_realign','b2_recheck','b3_wall_review'):
                 if self.pose_fixes.get(fid) is fix:self.pose_fixes.pop(fid)
                 self.view_anchors.pop(fid,None)
             alternatives=result.get('possible_layouts') or [result['floor']['layout_id']]

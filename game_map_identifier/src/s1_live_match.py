@@ -302,28 +302,49 @@ class LiveMatcher(FloorMatcher):
                 if result['accepted'] or result.get('candidates'): break
         return result
 
-    def review_landing(self,image,clear=None,incumbent=None):
+    def review_landing(self,image,clear=None,incumbent=None,pending=None):
         # A B2 passage and a previous B3 visit are position hints only. Compare
         # all B3 images on real unpainted pixels, without supplying their IDs.
         full=self._locate_live(image,None,'B3',1280,1024,verification=True,clear=clear)
         full=full if self.broad_b2(full,image.shape) else None
-        hit,support=compare_walls(self,image,map_area,clear,full,level='B3')
+        hit,support=compare_walls(self,image,map_area,clear,full,level='B3',incumbent=incumbent)
+        if hit and hit.get('conflicting_models'):return hit
         if not hit or (full and hit['floor']['id']!=full['floor']['id']):return None
         if incumbent not in (None,hit['floor']['layout_id']) and support.get(incumbent,0)>=.70*hit['inliers']:
             return None
+        if (full and pending==hit['floor']['layout_id'] and full['verified_rooms']>=6
+                and hit['inliers']>=20):
+            # A stationary, well-explored view may not reveal new cells. Require
+            # each of two disjoint regions to independently beat all 14 rivals.
+            axis=int(np.argmax(np.ptp(full['points'],axis=0)))
+            cut=round(float(np.median(full['points'][:,axis])))
+            mask=map_area(image)
+            if clear is not None:mask=cv2.bitwise_and(mask,clear)
+            domain=np.indices(mask.shape,sparse=True)[1-axis] < cut
+            pts=np.c_[full['points'],np.ones(len(full['points']))].T
+            verified=[]
+            for side in (domain,~domain):
+                region=np.where(side,mask,0).astype(np.uint8)
+                local,_=compare_walls(self,image,map_area,region,full,level='B3')
+                if not local or local['floor']['id']!=hit['floor']['id']:break
+                delta=(local['matrix']-hit['matrix'])@np.linalg.inv(np.vstack((hit['matrix'],[0,0,1])))@pts
+                if np.percentile(np.linalg.norm(delta,axis=0),75)>image.shape[0]*.007:break
+                verified.append(local['inliers'])
+            hit['disjoint_proof']=len(verified)==2
         return hit
 
-    def confirm_b2(self,image,clear=None,incumbent=None):
+    def confirm_b2(self,image,clear=None,incumbent=None,entry=False):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.
         hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)
         full=self.broad_b2(hit,image.shape)
-        if full and not incumbent:
+        if full and not incumbent and not entry:
             full['proof_kind']='full'
             return full
-        wall,support=compare_walls(self,image,map_area,clear,full)
+        wall,support=compare_walls(self,image,map_area,clear,full,incumbent=incumbent)
+        if wall and wall.get('conflicting_models'):return wall
         if not wall:
-            if full and full['floor']['layout_id']==incumbent:
+            if full and not entry and full['floor']['layout_id']==incumbent:
                 full['proof_kind']='full'
                 return full
             return None

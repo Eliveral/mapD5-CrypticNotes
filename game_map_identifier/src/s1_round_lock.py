@@ -4,14 +4,20 @@ class LandingReview:
     def __init__(self):
         self.layout=None
         self.waiting=False
+        self.since=-1.
         self.pending=None
         self.cells=set()
         self.reference=None
         self.at=-1.
 
     def observe(self,hit,b2):
-        if not hit or hit['floor']['floor']!='B3' or hit['at']<=self.at:return False
+        if not hit or hit['floor']['floor']!='B3' or (hit['at']<=self.at or hit['at']<self.since):return False
         self.at=hit['at']
+        if hit.get('conflicting_models'):
+            changed=not self.waiting or self.pending is not None
+            self.waiting=True;self.pending=None;self.cells.clear()
+            self.reference=None
+            return changed
         target=hit['floor']['layout_id']
         if target==(self.layout or b2):
             changed=self.waiting or self.pending is not None
@@ -22,7 +28,7 @@ class LandingReview:
         if target!=self.pending:
             self.pending=target;self.cells=cells
             return True
-        if len(cells-self.cells)<3:return False
+        if len(cells-self.cells)<3 and not hit.get('disjoint_proof'):return False
         self.waiting=False
         self.layout=target;self.reference=hit
         self.pending=None;self.cells.clear()
@@ -46,6 +52,25 @@ class RoundLock:
         self.uncertain=False
         self.b1_conflict=False
         self.recheck_b2_after_landing=False
+        self.b2_arrival=False
+        self.b2_since=-1.
+        self.direct_b2=False
+
+    def enter_b2(self,at,new_visit,previous):
+        self.b2_arrival=True
+        self.b2_since=at
+        if new_visit:
+            self.direct_b2=previous!='B1'
+            self.proposal=None;self.proposal_count=0;self.cells.clear()
+            if not self.layout:self.candidate=None;self.count=0
+
+    def enter_b3(self,at,new_visit):
+        if new_visit:
+            prior=self.landing.layout
+            self.landing=LandingReview()
+            self.landing.layout=prior
+        self.landing.waiting=True
+        self.landing.since=at
 
     @property
     def challenger(self):
@@ -63,8 +88,8 @@ class RoundLock:
     def blocks_floor(self,level):
         disputed=bool(self.uncertain or self.challenger or self.b1_conflict)
         if level=='B3':
-            return self.landing.waiting or bool(self.landing.pending) or (disputed and not self.landing.layout)
-        return (disputed or self.recheck_b2_after_landing) and level!='B1'
+            return self.landing.waiting or bool(self.landing.pending) or ((disputed or self.b2_arrival) and not self.landing.layout)
+        return (disputed or self.recheck_b2_after_landing or self.b2_arrival) and level!='B1'
 
     def observe_landing(self,hit):
         review=self.landing
@@ -89,7 +114,7 @@ class RoundLock:
         if reference['floor']['floor']!='B2' or not reference.get('unique_layout') or reference.get('provisional'):
             return False
         stamp=reference['at']
-        if stamp<=self.last_capture:return False
+        if stamp<=self.last_capture or stamp<self.b2_since:return False
         self.last_capture=stamp
         if reference.get('conflicting_models'):
             changed=not self.uncertain
@@ -101,7 +126,8 @@ class RoundLock:
         layout=reference['floor']['layout_id']
         if self.layout==layout:
             disputed=bool(self.challenger)
-            rechecked=self.b1_conflict or self.recheck_b2_after_landing
+            rechecked=self.b1_conflict or self.recheck_b2_after_landing or self.b2_arrival
+            self.b2_arrival=False
             self.b1_conflict=False
             self.recheck_b2_after_landing=False
             self.reference=reference
@@ -119,9 +145,13 @@ class RoundLock:
         self.cells.update(cells);self.proposal_count+=1
         if not self.layout:self.candidate,self.count=layout,self.proposal_count
         if self.proposal_count==self.required:
-            if self.layout and self.layout!=layout and self.landing.layout!=layout:self.landing=LandingReview()
+            if self.layout and self.layout!=layout and self.landing.layout!=layout:
+                require_b3=self.landing.waiting or self.b2_arrival or self.direct_b2
+                self.landing=LandingReview()
+                self.landing.waiting=require_b3
             self.recheck_b2_after_landing=False
             self.layout=layout
+            self.b2_arrival=False
             self.b1_conflict=False
             self.reference=reference
             self.candidate,self.count=layout,self.required
@@ -139,6 +169,7 @@ class RoundLock:
         if self.landing.layout and self.landing.layout!=self.layout:
             b2=self.layout[3:] if self.layout else '未确认'
             return f'负二 {b2} · 负三独立确认 {self.landing.layout[3:]}'
+        if self.b2_arrival:return f'负二落点重新核对 · {self.proposal_count}/{self.required}'
         if self.layout:return '本局已锁定 · 布局 '+self.layout[3:]+'（负二已确认 3 次）'
         if self.candidate:return f'负二核对 {self.count}/{self.required} · 布局 {self.candidate[3:]}'
         return '等待负二确认本局布局'
