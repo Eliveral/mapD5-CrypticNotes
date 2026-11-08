@@ -175,7 +175,8 @@ class LiveController(base.LiveController):
         old=anchor['view_features']
         if (zoom_changed(old.zoom,features.zoom) or not same_view(anchor['signature'],sig)
                 or not old.same_pixels(features)):
-            motion=anchor['view_features'].motion_to(features)
+            motion=old.camera_motion(features)
+            if motion is None:motion=old.motion_to(features)
             if motion is None:return None
             hit['matrix']=motion[0]@np.vstack((hit['matrix'],[0,0,1]))
             hit['scale']=float(np.linalg.norm(hit['matrix'][0,:2]))
@@ -191,7 +192,7 @@ class LiveController(base.LiveController):
         token=object()
         self.proof_job=token
         incumbent=state.layout
-        interval=.25 if state.blocks_floor('B2') else 2.5 if incumbent else .65
+        interval=.25 if state.blocks_floor('B2') else 8. if incumbent else .65
         self.proof_due=sample['at']+interval
         entry=state.b2_arrival or state.recheck_b2_after_landing
         def verify():
@@ -223,7 +224,7 @@ class LiveController(base.LiveController):
         review=self.round_lock.landing
         token=object();self.landing_job=token
         incumbent=review.layout or (None if self.round_lock.blocks_floor('B2') else self.round_lock.layout)
-        self.landing_due=sample['at']+(.4 if review.pending or self.round_lock.blocks_floor('B3') or not incumbent else 4.)
+        self.landing_due=sample['at']+(.4 if review.pending or self.round_lock.blocks_floor('B3') or not incumbent else 8.)
         def inspect():
             ref=None
             try:
@@ -246,10 +247,18 @@ class LiveController(base.LiveController):
                 and queued['at']>=self.round_lock.landing.since):
             self.begin_landing(queued)
 
-    def needs_pose_update(self,ref):
-        visit=self.view_cache
+    def needs_pose_update(self,ref,visit=None):
+        if visit is None:visit=self.view_cache
         if not visit or visit['floor']['id']!=ref['floor']['id']:return False
-        if ref['at']<visit.get('sample_at',0) and not same_view(ref['signature'],visit['signature']):return False
+        if not same_view(ref['signature'],visit['signature']):
+            # Absolute matrices from two different camera positions are
+            # expected to differ. Only use new pixels as a rescue for a
+            # current view that has actually lost registration.
+            latest=self.latest
+            return bool(latest and latest.get('selected_floor')==ref['floor']['floor']
+                        and latest['presence']['visible'] and not self.display
+                        and ref['at']>=visit.get('sample_at',0)
+                        and same_view(ref['signature'],latest['signature']))
         old=visit['matrix'];fresh=ref['matrix'];h,w=ref['game'].bounds[3],ref['game'].bounds[2]
         probes=np.float64([[w*.35,h*.3,1],[w*.7,h*.65,1],[w*.55,h*.45,1]]).T
         delta=(fresh-old)@np.linalg.inv(np.vstack((old,[0,0,1])))@probes
@@ -304,8 +313,10 @@ class LiveController(base.LiveController):
                 reference['revision']!=self.session_revision or reference['game']!=self.game or
                 self.app.layout_limit.get()!='自动'):return
         changed=state.observe(reference)
-        needs_pose=(not self.display or self.display.get('selected_floor')!='B2' or
-                    not self.view_cache or self.view_cache['floor']['id']!=reference['floor']['id'] or self.needs_pose_update(reference))
+        retained=next((v for v in (self.view_cache,self.floor_visits.get('B2')) if v
+                       and v.get('floor',{}).get('id')==reference['floor']['id']
+                       and self.valid_visit(v,reference,float('inf'))),None)
+        needs_pose=retained is None or self.needs_pose_update(reference,retained)
         if not changed and (not needs_pose or state.uncertain or
                 state.preferred('B2')!=reference['floor']['layout_id']):return
         self.app.round_status.set(state.status())
