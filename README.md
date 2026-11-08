@@ -4,9 +4,17 @@
 
 ## 安装
 
-1. 从 [发布页](https://github.com/Eliveral/mapD5-CrypticNotes/releases/latest) 下载 `MapD5-Windows-x64.zip`，完整解压到一个文件夹，再双击 `MapD5.exe`。
+1. 从 [发布页](https://github.com/Eliveral/mapD5-CrypticNotes/releases/tag/v3.7.16-rc.1) 下载 `MapD5-Windows-x64.zip`，完整解压到一个文件夹，再双击 `MapD5.exe`。
 2. 首次选择「安装 S1 地图」。程序自带当前地图索引，从注明的上游固定版本下载约 18 MiB 的高清底图，并逐张校验。装好后可以离线使用。
 3. 回到游戏，按自己的地图键。默认是 Caps Lock，可在「检测设置」里改为 M 或 Tab，并调整底图不透明度。F9 隐藏或恢复覆盖，F10 停止检测。
+
+## 更新程序
+
+从 3.7.16 开始，助手启动后在后台检查本仓库的 GitHub Releases。点右上角版本或打开「程序更新」，有新版时点「一键更新并重启」。测试版跟踪测试版与正式版，正式版跟踪正式版。同系列优先用小补丁，其他受支持的版本用完整 Windows 包。下载或校验失败可重试；新程序启动失败会尝试恢复原版。个人地图库和快捷键保存在用户目录。
+
+3.7.15 及更早版本首次升级，可下载本版完整包，或关闭助手后用 3.7.x 补丁替换 MapD5.exe。此后更新沿用同一启动位置。
+
+发布新版本时，将 `s1_program_update.APP_TAG` 设为发布标签（例如 `v3.7.16-rc.1`），再构建 Windows 程序。只有在运行库与整个对应版本系列兼容时才发布 `MapD5-主.次.x-to-主.次.修订.zip`，其中包含 `MapD5.exe`。完整包名为 `MapD5-Windows-x64.zip`，根目录为 `MapD5/`。更新器使用 GitHub 返回的附件大小与 SHA-256。
 
 ## 更新地图
 

@@ -15,6 +15,8 @@ from .s1_catalog import S1Catalog, read_image
 from .s1_landmarks import RoomLabels, badge
 from .s1_updates import map_root
 from .s1_update_panel import UpdatePanel
+from .s1_program_panel import ProgramUpdatePanel
+from .s1_program_update import APP_TAG,startup_receipt
 
 BG='#111827'; PANEL='#1f2937'; FG='#e5e7eb'; MUTED='#a7b3c6'
 DEFAULT_OVERLAY_OPACITY=28
@@ -24,7 +26,7 @@ class S1Window(tk.Tk):
     def __init__(self, autostart=True, controls=True, start_hidden=False):
         super().__init__()
         if start_hidden:self.withdraw()
-        self.title('MapD5 · 加页手记地图助手 3.7.15')
+        self.title('MapD5 · 加页手记地图助手 '+APP_TAG[1:])
         self.geometry('1100x760'); self.minsize(780,540); self.configure(bg=BG)
         self.reload_maps=False;self.resume_detection=autostart
         self.catalog=S1Catalog(map_root(project_root()))
@@ -48,7 +50,8 @@ class S1Window(tk.Tk):
         head=tk.Frame(self,bg=BG);head.pack(fill='x',padx=18,pady=(15,8))
         tk.Label(head,text='加页手记',bg=BG,fg=FG,font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
         tk.Label(head,text='磷光症  /  S1 噩梦',bg=BG,fg=MUTED,font=('Microsoft YaHei UI',12)).pack(side='left',padx=14)
-        tk.Label(head,text='MapD5  3.7.15',bg=BG,fg=MUTED).pack(side='right')
+        self.version_label=tk.StringVar(value='MapD5  '+APP_TAG[1:])
+        ttk.Button(head,textvariable=self.version_label,command=lambda:self.open_program_update(tabs)).pack(side='right')
         primary=tk.Frame(self,bg=PANEL);primary.pack(fill='x',padx=18,pady=(4,10))
         self.detect_button=tk.Button(primary,text='▶ 一键开启检测匹配',command=lambda:self.live.start(True),
             bg='#0f766e',fg='white',activebackground='#115e59',activeforeground='white',
@@ -67,7 +70,11 @@ class S1Window(tk.Tk):
         tabs=ttk.Notebook(self);tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
         gallery=tk.Frame(tabs,bg=BG);settings=tk.Frame(tabs,bg=BG)
         self.update_panel=UpdatePanel(tabs,project_root()/'maps.zip',self.apply_maps,self.catalog.root.parent.parent)
+        self.update_panel.allow_install=lambda:self.program_panel.phase!='installing'
+        self.program_panel=ProgramUpdatePanel(tabs,self.program_notice,self.destroy,self.can_update_program,
+                                              lambda:self.live.active,auto_check=controls)
         tabs.add(gallery,text='地图库');tabs.add(settings,text='检测设置');tabs.add(self.update_panel,text='地图更新')
+        tabs.add(self.program_panel,text='程序更新')
         bar=tk.Frame(gallery,bg=BG);bar.pack(fill='x',pady=8)
         self.mode=ttk.Combobox(bar,textvariable=self.kind,values=tuple(GALLERY_KINDS),state='readonly',width=12)
         self.mode.pack(side='left');self.mode.bind('<<ComboboxSelected>>',lambda e:self.populate())
@@ -135,6 +142,18 @@ class S1Window(tk.Tk):
         self.live=LiveController(self, autostart=autostart, controls=controls)
         self.protocol('WM_DELETE_WINDOW',self.destroy)
         self.populate();self.after(120,self.poll)
+
+    def open_program_update(self,tabs):
+        tabs.select(self.program_panel)
+        if self.program_panel.release:self.program_panel.install()
+
+    def program_notice(self,tag):
+        self.version_label.set(('一键更新到 '+tag) if tag else 'MapD5  '+APP_TAG[1:])
+
+    def can_update_program(self):
+        if self.update_panel.busy:return '请等待地图更新结束，再更新程序。'
+        if getattr(self,'legacy_process',None) and self.legacy_process.poll() is None:return '请先关闭原版模式，再更新程序。'
+        return ''
 
     def apply_maps(self):
         self.resume_detection=self.live.active;self.reload_maps=True
@@ -275,6 +294,8 @@ class S1Window(tk.Tk):
         self.populate();self.tree.selection_set(target['id']);self.tree.see(target['id'])
 
     def open_legacy(self):
+        if self.program_panel.phase=='installing':
+            self.live_status.set('正在更新程序，请等待自动重启。');return
         if not (project_root()/'models').is_dir():
             if messagebox.askyesno('厄运之女原版','厄运之女使用原项目的独立模型和地图库。打开原项目下载页？',parent=self):
                 webbrowser.open('https://github.com/LD-592114824/IdentityV_Cryptic_Notes_Assistant/releases')
@@ -306,12 +327,32 @@ def main():
     cv2.setNumThreads(2)
     enable_physical_pixel_coordinates()
     resume='--standby' not in sys.argv
+    token=None
+    if '--program-update-ready' in sys.argv:
+        try:
+            token=sys.argv[sys.argv.index('--program-update-ready')+1]
+            startup_receipt(Path(sys.executable),token)
+        except (IndexError,OSError,ValueError):
+            return 2
+    def ready(window):
+        def acknowledge():
+            nonlocal token
+            if token:
+                startup_receipt(Path(sys.executable),token,ready=True)
+                token=None
+        if token:window.after_idle(acknowledge)
     while True:
         if not (map_root(project_root())/'catalog.json').is_file():
-            setup=tk.Tk();setup.title('MapD5 · 安装地图');setup.geometry('660x295')
-            panel=UpdatePanel(setup,project_root()/'maps.zip',setup.destroy);panel.pack(fill='both',expand=True)
-            setup.mainloop()
+            setup=tk.Tk();setup.title('MapD5 · 首次使用');setup.geometry('680x355')
+            tabs=ttk.Notebook(setup);tabs.pack(fill='both',expand=True)
+            maps=UpdatePanel(tabs,project_root()/'maps.zip',setup.destroy)
+            program=ProgramUpdatePanel(tabs,
+                lambda tag:tabs.tab(program,text='程序更新（有新版）' if tag else '程序更新'),
+                setup.destroy,lambda:'请等待地图安装结束。' if maps.busy else '',lambda:resume,auto_check=True)
+            maps.allow_install=lambda:program.phase!='installing'
+            tabs.add(maps,text='安装地图');tabs.add(program,text='程序更新')
+            ready(setup);setup.mainloop()
             if not (map_root(project_root())/'catalog.json').is_file():return 0
-        app=S1Window(autostart=resume);app.mainloop()
+        app=S1Window(autostart=resume);ready(app);app.mainloop()
         if not app.reload_maps:return 0
         resume=app.resume_detection

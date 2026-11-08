@@ -15,6 +15,7 @@ class UpdatePanel(ttk.Frame):
         self.bank=profile()/'maps';self.bundled=bundled;self.on_install=on_install
         self.current=record(current_root).get('version',0) if current_root else 0
         self.events=Queue();self.busy=False;self.buttons=[]
+        self.allow_install=lambda:True
         self.status=tk.StringVar(value='可从 GitHub 获取更新，也可以选择本地地图包。')
         ttk.Label(self,text='地图更新',font=('Microsoft YaHei UI',18,'bold')).pack(anchor='w')
         current=f'已安装地图版本  {self.current}' if self.current else ('当前使用随程序提供的图库' if current_root else '首次使用，请先安装 S1 地图库')
@@ -38,6 +39,8 @@ class UpdatePanel(ttk.Frame):
 
     def start(self,archive):
         if self.busy:return
+        if not self.allow_install():
+            self.status.set('正在更新程序，请等待重启。');return
         self.busy=True;self.indicator.start(20)
         for b in self.buttons:b.state(['disabled'])
         self.status.set('正在检查地图包…' if archive else '正在连接发布仓库…')
