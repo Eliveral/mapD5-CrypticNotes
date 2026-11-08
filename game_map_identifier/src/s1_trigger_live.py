@@ -587,7 +587,15 @@ class LiveController(base.LiveController):
                     origin=last.get('handoff_origin') if moving or last.get('provisional') else None
                 result=None
                 from_level=observed if observed!=floor else transfer_from
-                if (pair_identity and {from_level,floor}=={'B2','B3'} and presence['visible']
+                # On entry/reopen the board directly anchors the current B3.
+                # Regular same-floor tracking remains cheaper on a moving view.
+                if (floor=='B3' and trusted['B3'] and presence['visible'] and not manual and not self.warming
+                        and floor_limit in ('自动','B3') and (changing or (not probe and not self.display))):
+                    source=next((v for v in (last,b3_visit,known_visit,known_b2)
+                                 if v and v['floor']['layout_id']==trusted['B3'] and self.valid_visit(v,sample,lifetime)
+                                 and v.get('unique_layout') and not v.get('provisional')),None)
+                    result=self.matcher.locate_board(frame,trusted['B3'],clear,source,zoom)
+                if (not result and pair_identity and {from_level,floor}=={'B2','B3'} and presence['visible']
                         and not manual and not self.warming and floor_limit in ('自动',floor)
                         and wanted in (None,pair_identity) and (from_level=='B3' or locked==pair_identity or local_b2==pair_identity)):
                     source_fid=pair_identity+'_'+from_level

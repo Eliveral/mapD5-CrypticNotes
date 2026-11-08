@@ -10,6 +10,7 @@ from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
 from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
+from .s1_blackboard import board_pose
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
 from .s1_pose_check import PoseCheck
@@ -56,7 +57,24 @@ class LiveMatcher(FloorMatcher):
             if floor and sites:
                 self.original.source(floor)
                 self.corridors.reference_channels(floor)
+                if level=='B3':self.pose_check.distances(floor['id'],True)
                 for _,point,_ in sites:self.handoffs.site(floor,point)
+
+    def locate_board(self,image,layout,clear=None,visit=None,zoom=None):
+        floor=self.handoffs.floors.get(layout+'_B3') if layout else None
+        if not floor:return None
+        if not hasattr(self,'room_labels'):self.room_labels=RoomLabels(self.catalog)
+        station=self.room_labels.points.get(floor['id'],{}).get('supply')
+        if station is None:return None
+        scale=None
+        if (visit and visit['floor']['layout_id']==layout and visit.get('unique_layout')
+                and not visit.get('provisional') and zoom is not None):
+            old_zoom=visit.get('zoom')
+            if old_zoom is None and visit.get('view_features'):old_zoom=visit['view_features'].zoom
+            if old_zoom is not None and not zoom_changed(old_zoom,zoom):
+                mat,_=self.coordinates.predict(visit,'B3')
+                if mat is not None:scale=float(np.linalg.norm(mat[0,:2]))
+        return board_pose(self,image,map_area,floor,station,clear,scale)
 
     def paired_b3(self,image,visit,locked,clear=None):
         return self.paired_floor(image,visit,'B3',locked,clear)
@@ -332,6 +350,9 @@ class LiveMatcher(FloorMatcher):
     def _locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
         if floor_name not in ('B1', 'B2', 'B3'):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
+        if floor_name=='B3' and layout:
+            hit=self.locate_board(image,layout,visit=visit,zoom=zoom_position(image))
+            if hit:return hit
         if floor_name=='B1' and not layout:
             return self.review_b1(image) or dict(accepted=False,candidates=[],reason='当前负一缺少可独立定位的固定墙线。')
         if floor_name=='B2' and not layout and visit and visit['floor']['floor']!='B2':

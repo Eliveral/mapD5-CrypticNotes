@@ -57,7 +57,10 @@ if __name__ == '__main__':
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         landing_pose=None
         certified=lock.layout or lock.landing.layout
-        if (prior and presence['visible'] and {selected,prior['floor']['floor']}=={'B2','B3'}
+        if certified and selected=='B3' and presence['visible'] and not lock.blocks_floor('B3'):
+            if prior:prior['zoom']=zoom_position(prior_image)
+            landing_pose=matcher.locate_board(frame,lock.preferred('B3'),visit=prior,zoom=zoom_position(frame))
+        if (landing_pose is None and prior and presence['visible'] and {selected,prior['floor']['floor']}=={'B2','B3'}
                 and certified and not lock.blocks_floor(selected) and not lock.blocks_floor(prior['floor']['floor'])
                 and lock.preferred(selected) in (None,certified) and lock.preferred(prior['floor']['floor'])==certified
                 and (lock.layout==certified or prior['floor']['floor']=='B3' or lock.region_layout==certified)):
