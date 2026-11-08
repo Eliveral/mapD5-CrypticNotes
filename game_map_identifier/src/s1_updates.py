@@ -107,7 +107,8 @@ def validate(root):
         width,height=cat.by_id['hd_'+key.removeprefix('s1_')]['size']
         markers=points.get(key,{})
         required = {'B1':set(), 'B2':{'supply'}, 'B3':{'supply','star'}}[level]
-        allowed = required | {'alchemy'} if level == 'B3' else required
+        optional = {'B1':set(), 'B2':{'race'}, 'B3':{'alchemy'}}
+        allowed = required | optional[level]
         if not required <= set(markers) <= allowed:
             raise ValueError('房间标注不完整')
         for x,y in markers.values():

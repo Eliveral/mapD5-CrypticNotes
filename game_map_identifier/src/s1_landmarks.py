@@ -11,7 +11,15 @@ from PIL import Image, ImageDraw, ImageFont
 from .s1_alchemy import ALCHEMY_CENTERS
 
 
-ROOM_NAMES = {'supply':'维修站', 'star':'寰星房', 'alchemy':'炼金室'}
+# B2 starter rooms explicitly marked 发令台 in the 展十 S1 atlas.
+RACE_CENTERS = {
+    ("s1_01", "468bbd6c768caa34ec58d92fd0887b54b2d825895151d9d02c6e172ee751a259"): (455, 1120),
+    ("s1_02", "0c488504c2b929c68d099a85473dcd7898ff4fae5533949392bece4330499884"): (697, 1120),
+    ("s1_07", "714df4e79fd94851ef1f48c64460f2527c784189e1b8a513741f545bfe8bfa00"): (576, 1181),
+    ("s1_10", "d5495600d93bafc28cc94af48a5becbd81854e210878fca88c3f2f3f107d2517"): (1665, 1180),
+}
+
+ROOM_NAMES = {'supply':'维修站', 'star':'寰星房', 'alchemy':'炼金室', 'race':'竞速房'}
 
 
 @lru_cache(maxsize=18)
@@ -41,12 +49,20 @@ class RoomLabels:
         self.hd_matrices=json.loads((config/'s1_hd_registration.json').read_text('utf-8'))
         self.catalog=catalog
         for entry in catalog.entries:
-            if entry['kind'] != 'hd' or entry['floor'] != 'B3':
+            if entry['kind'] != 'hd':
                 continue
-            center = ALCHEMY_CENTERS.get(entry['sha256'])
+            level=entry['floor']
+            if level=='B2':
+                key='race'
+                center=RACE_CENTERS.get((entry['layout_id'],entry['sha256']))
+            elif level=='B3':
+                key='alchemy'
+                center=ALCHEMY_CENTERS.get(entry['sha256'])
+            else:
+                continue
             if center is not None:
-                fid = entry['layout_id'] + '_B3'
-                self.points.setdefault(fid, {}).setdefault('alchemy', center)
+                fid=entry['layout_id']+'_'+level
+                self.points.setdefault(fid,{}).setdefault(key,center)
 
     def projected(self, fid, matrix):
         labels=[]
