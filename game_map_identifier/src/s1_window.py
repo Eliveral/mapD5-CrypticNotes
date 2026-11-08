@@ -18,9 +18,9 @@ from .s1_update_panel import UpdatePanel
 from .s1_program_panel import ProgramUpdatePanel
 from .s1_program_update import APP_TAG,startup_receipt
 
-BG='#111827'; PANEL='#1f2937'; FG='#e5e7eb'; MUTED='#a7b3c6'
+from .s1_theme import BG, JADE, MUTED, apply_theme
+from . import s1_desktop as desktop
 DEFAULT_OVERLAY_OPACITY=28
-GALLERY_KINDS={'高清单层':'hd','三层总览':'structure'}
 
 class S1Window(tk.Tk):
     def __init__(self, autostart=True, controls=True, start_hidden=False):
@@ -32,68 +32,24 @@ class S1Window(tk.Tk):
         self.catalog=S1Catalog(map_root(project_root()))
         self.layouts=sorted({e['layout_id'][3:] for e in self.catalog.entries if e['kind']=='structure'})
         self.room_labels=RoomLabels(self.catalog);self.gallery_labels=[]
-        self.kind=tk.StringVar(value='高清单层');self.note=tk.StringVar();self.status=tk.StringVar()
+        self.note=tk.StringVar();self.status=tk.StringVar()
         self.last_gallery_floor='B1'
         self.current=None;self.original=None;self.photo=None;self.zoom=1;self.pan=[0,0]
         self.messages=queue.Queue();self.busy=False
-        style=ttk.Style(self);style.theme_use('clam')
-        style.configure('.',background=BG,foreground=FG,font=('Microsoft YaHei UI',10))
-        style.configure('TButton',background=PANEL,padding=(10,6),font=('Microsoft YaHei UI',10))
-        style.map('TButton',background=[('active','#334155')])
-        style.configure('TNotebook',borderwidth=0,background=BG)
-        style.configure('TNotebook.Tab',padding=(18,8),background=PANEL,foreground=MUTED)
-        style.map('TNotebook.Tab',background=[('selected','#175b62')],foreground=[('selected','white')])
-        style.configure('TCombobox',fieldbackground=PANEL,background=PANEL)
-        style.map('TCombobox',fieldbackground=[('readonly',PANEL)],foreground=[('readonly',FG)])
-        style.configure('Treeview',background=PANEL,fieldbackground=PANEL,foreground=FG,rowheight=31,font=('Microsoft YaHei UI',10))
-        style.map('Treeview',background=[('selected','#176b76')])
-        head=tk.Frame(self,bg=BG);head.pack(fill='x',padx=18,pady=(15,8))
-        tk.Label(head,text='加页手记',bg=BG,fg=FG,font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
-        tk.Label(head,text='磷光症  /  S1 噩梦',bg=BG,fg=MUTED,font=('Microsoft YaHei UI',12)).pack(side='left',padx=14)
-        self.version_label=tk.StringVar(value='MapD5  '+APP_TAG[1:])
-        ttk.Button(head,textvariable=self.version_label,command=lambda:self.open_program_update(tabs)).pack(side='right')
-        primary=tk.Frame(self,bg=PANEL);primary.pack(fill='x',padx=18,pady=(4,10))
-        self.detect_button=tk.Button(primary,text='▶ 一键开启检测匹配',command=lambda:self.live.start(True),
-            bg='#0f766e',fg='white',activebackground='#115e59',activeforeground='white',
-            font=('Microsoft YaHei UI',14,'bold'),relief='flat',cursor='hand2',padx=20,pady=13)
-        self.detect_button.pack(side='right',padx=(4,12),pady=9)
-        self.stop_button=ttk.Button(primary,text='停止检测',command=lambda:self.live.stop())
-        self.stop_button.pack(side='right',padx=12)
-        self.detect_state=tk.StringVar(value='检测未开启')
-        tk.Label(primary,textvariable=self.detect_state,bg=PANEL,fg='#5eead4',font=('Microsoft YaHei UI',11,'bold'),anchor='w').pack(fill='x',padx=12,pady=(12,2))
-        self.live_status=tk.StringVar(value='切回游戏，按地图键即可检测。')
-        tk.Label(primary,textvariable=self.live_status,bg=PANEL,fg=MUTED,font=('Microsoft YaHei UI',10),anchor='w',wraplength=480).pack(fill='x',padx=12,pady=(0,8))
-        self.round_status=tk.StringVar(value='等待负二确认本局布局')
-        roundbar=tk.Frame(primary,bg=PANEL);roundbar.pack(fill='x',padx=12,pady=(0,8))
-        tk.Label(roundbar,textvariable=self.round_status,bg=PANEL,fg='#5eead4',anchor='w').pack(side='left')
-        ttk.Button(roundbar,text='新对局',command=lambda:self.live.new_round()).pack(side='left',padx=8)
-        tabs=ttk.Notebook(self);tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
+        apply_theme(self)
+        self.fitted=True
+        self.candidate_layouts=None
+        tabs=ttk.Notebook(self)
+        desktop.header(self,tabs,APP_TAG)
+        tabs.pack(fill='both',expand=True,padx=20,pady=(0,10))
+        tabs.enable_traversal()
         gallery=tk.Frame(tabs,bg=BG);settings=tk.Frame(tabs,bg=BG)
         self.update_panel=UpdatePanel(tabs,project_root()/'maps.zip',self.apply_maps,self.catalog.root.parent.parent)
         self.update_panel.allow_install=lambda:self.program_panel.phase!='installing'
         self.program_panel=ProgramUpdatePanel(tabs,self.program_notice,self.destroy,self.can_update_program,
                                               lambda:self.live.active,auto_check=controls)
-        tabs.add(gallery,text='地图库');tabs.add(settings,text='检测设置');tabs.add(self.update_panel,text='地图更新')
-        tabs.add(self.program_panel,text='程序更新')
-        bar=tk.Frame(gallery,bg=BG);bar.pack(fill='x',pady=8)
-        self.mode=ttk.Combobox(bar,textvariable=self.kind,values=tuple(GALLERY_KINDS),state='readonly',width=12)
-        self.mode.pack(side='left');self.mode.bind('<<ComboboxSelected>>',lambda e:self.populate())
-        self.file_button=ttk.Button(bar,text='从截图找候选',command=self.choose_screenshot);self.file_button.pack(side='left',padx=8)
-        ttk.Button(bar,text='总图 / 单层',command=self.switch_pair).pack(side='left',padx=4)
-        ttk.Button(bar,text='上下层对照',command=self.show_overlap).pack(side='left',padx=4)
-        ttk.Button(bar,text='适应窗口',command=self.fit).pack(side='left',padx=4)
-        ttk.Button(bar,text='原图大小',command=self.actual_size).pack(side='left',padx=4)
-        ttk.Button(bar,text='查看图源',command=self.open_source).pack(side='right')
-        tk.Label(settings,text='快捷操作',bg=BG,fg=FG,font=('Microsoft YaHei UI',13,'bold')).pack(anchor='w',padx=18,pady=(14,6))
-        livebar=tk.Frame(settings,bg=PANEL);livebar.pack(fill='x',padx=18,pady=(0,8))
-        ttk.Button(livebar,text='重新识别 F8',command=lambda:self.live.start(False)).pack(side='left',padx=3,pady=5)
-        ttk.Button(livebar,text='恢复自动 F7',command=lambda:self.live.start(True)).pack(side='left',padx=3)
-        ttk.Button(livebar,text='隐藏/恢复 F9',command=lambda:self.live.toggle_hidden()).pack(side='left',padx=3)
-        ttk.Button(livebar,text='停止 F10',command=lambda:self.live.stop()).pack(side='left',padx=3)
-        ttk.Button(livebar,text='框选地图区域',command=lambda:self.live.pick_region()).pack(side='left',padx=3)
-        ttk.Button(livebar,text='恢复游戏全窗',command=lambda:self.live.reset_region()).pack(side='left',padx=3)
-        tk.Label(settings,text='识别与显示',bg=BG,fg=FG,font=('Microsoft YaHei UI',13,'bold')).pack(anchor='w',padx=18,pady=(14,6))
-        opts=tk.Frame(settings,bg=BG);opts.pack(fill='x',padx=18,pady=(0,6))
+        tabs.add(gallery,text='地图库');tabs.add(settings,text='检测设置')
+        tabs.add(self.update_panel,text='地图更新');tabs.add(self.program_panel,text='程序更新')
         self.layout_limit=tk.StringVar(value='自动');self.floor_limit=tk.StringVar(value='自动')
         self.preferences_path=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'CrypticNotesAssistantS1'/'preferences-v32.json'
         self.persist_preferences=controls
@@ -111,44 +67,34 @@ class S1Window(tk.Tk):
         self.map_key=tk.StringVar(value=chosen_key)
         self.overlay_style=tk.StringVar(value='高清底图');self.overlay_alpha=tk.DoubleVar(value=opacity)
         self.opacity_label=tk.StringVar(value=f'{opacity}%')
-        tk.Label(opts,text='地图键',bg=BG,fg=FG).pack(side='left',padx=(8,4))
-        keybox=ttk.Combobox(opts,textvariable=self.map_key,values=('Caps Lock','M','Tab'),state='readonly',width=10)
-        keybox.pack(side='left');keybox.bind('<<ComboboxSelected>>',self.change_map_key)
-        for label,var,values in [('布局',self.layout_limit,['自动']+self.layouts),('楼层',self.floor_limit,['自动','B1','B2','B3']),('叠加',self.overlay_style,['高清底图','结构'])]:
-            tk.Label(opts,text=label,bg=BG,fg=FG).pack(side='left',padx=(8,4))
-            box=ttk.Combobox(opts,textvariable=var,values=values,state='readonly',width=8)
-            box.pack(side='left');box.bind('<<ComboboxSelected>>',lambda e:self.live.settings_changed())
-        opacity_row=tk.Frame(settings,bg=BG);opacity_row.pack(fill='x',padx=26,pady=12)
-        tk.Label(opacity_row,text='底图不透明度',bg=BG,fg=FG).pack(side='left',padx=(0,6))
-        ttk.Scale(opacity_row,from_=15,to=90,length=235,variable=self.overlay_alpha,command=self.change_opacity).pack(side='left')
-        tk.Label(opacity_row,textvariable=self.opacity_label,width=5,bg=BG,fg=FG).pack(side='left')
-        ttk.Button(settings,text='厄运之女 · 原版识别',command=self.open_legacy).pack(anchor='w',padx=22,pady=10)
-        panes=tk.PanedWindow(gallery,orient='horizontal',bg=BG,sashwidth=5);panes.pack(fill='both',expand=True)
-        left=tk.Frame(panes,bg=PANEL,width=235);panes.add(left,minsize=200,width=235)
-        scroll=ttk.Scrollbar(left,orient='vertical');scroll.pack(side='right',fill='y')
-        self.tree=ttk.Treeview(left,show='tree',selectmode='browse',yscrollcommand=scroll.set);self.tree.pack(fill='both',expand=True)
-        scroll.configure(command=self.tree.yview)
-        self.tree.bind('<<TreeviewSelect>>',self.select)
-        self.canvas=tk.Canvas(panes,bg='#0a0f18',highlightthickness=0);panes.add(self.canvas,minsize=385)
-        self.canvas.bind('<Configure>',lambda e:self.render())
-        self.canvas.bind('<MouseWheel>',self.wheel)
-        self.canvas.bind('<ButtonPress-1>',lambda e:setattr(self,'drag',(e.x,e.y)))
-        self.canvas.bind('<B1-Motion>',self.drag_image)
-        self.canvas.bind('<Double-Button-1>',lambda e:self.fit())
-        tk.Label(gallery,textvariable=self.note,bg=BG,fg=FG,anchor='w',justify='left',font=('Microsoft YaHei UI',10)).pack(fill='x',padx=20,pady=(10,4))
-        tk.Label(gallery,textvariable=self.status,bg=BG,fg='#7dd3cf',anchor='w',justify='left',wraplength=1180,font=('Microsoft YaHei UI',10)).pack(fill='x',padx=20,pady=(0,5))
-        tk.Label(gallery,text='滚轮缩放  ·  拖动平移  ·  双击适应窗口',bg=BG,fg=MUTED,anchor='w',font=('Microsoft YaHei UI',9)).pack(fill='x',padx=20,pady=(0,12))
+        desktop.gallery(self,gallery)
+        desktop.settings(self,settings)
         from .s1_trigger_live import LiveController
         self.live=LiveController(self, autostart=autostart, controls=controls)
+        self.update_detection_action()
         self.protocol('WM_DELETE_WINDOW',self.destroy)
         self.populate();self.after(120,self.poll)
+
+    def toggle_detection(self):
+        if self.live.active and self.live.continuous and not self.live.hidden:
+            self.live.stop()
+        else:
+            self.live.start(True)
+
+    def update_detection_action(self):
+        controller=getattr(self,'live',None)
+        active=bool(controller and controller.active)
+        running=active and controller.continuous and not controller.hidden
+        self.detect_light.itemconfigure('lamp',fill=JADE if active else MUTED)
+        self.detection_action.configure(text='停止检测' if running else ('恢复自动检测' if active else '开启检测'),
+                                        style='TButton' if running else 'Primary.TButton')
 
     def open_program_update(self,tabs):
         tabs.select(self.program_panel)
         if self.program_panel.release:self.program_panel.install()
 
     def program_notice(self,tag):
-        self.version_label.set(('一键更新到 '+tag) if tag else 'MapD5  '+APP_TAG[1:])
+        self.version_label.set(('一键更新到 '+tag) if tag else APP_TAG)
 
     def can_update_program(self):
         if self.update_panel.busy:return '请等待地图更新结束，再更新程序。'
@@ -191,20 +137,36 @@ class S1Window(tk.Tk):
                 self.live_status.set('设置已生效，本次未能保存。')
 
     def populate(self,ids=None):
+        selected=self.tree.selection()
+        if ids is not None:
+            self.candidate_layouts=list(dict.fromkeys(self.catalog.by_id[i]['layout_id'][3:] for i in ids))
+            self.clear_candidates.grid(row=2,column=0,columnspan=2,sticky='ew',padx=8,pady=(5,0))
+            selected=()
+        layouts=self.layouts if self.candidate_layouts is None else self.candidate_layouts
         self.tree.delete(*self.tree.get_children())
-        kind=GALLERY_KINDS[self.kind.get()]
-        pool=(self.catalog.by_id[i] for i in ids) if ids is not None else self.catalog.entries
-        entries=[e for e in pool if e['kind']==kind]
-        for e in entries:self.tree.insert('', 'end', iid=e['id'],text=e['title'].replace('· 结构','· 三层总览'))
-        if entries:
-            self.tree.selection_set(entries[0]['id']);self.tree.focus(entries[0]['id'])
-        if ids is None:
-            self.status.set(f'{len(self.layouts)} 套噩梦地图 · 地下一至三层')
+        self.count.set(f'{len(layouts)} 套')
+        for layout in layouts:
+            self.tree.insert('', 'end', iid=layout,text='   布局  '+layout)
+        if layouts:
+            target=selected[0] if selected and selected[0] in layouts else layouts[0]
+            self.tree.selection_set(target);self.tree.focus(target);self.tree.see(target)
+            self.select()
+
+    def clear_search(self):
+        self.candidate_layouts=None
+        self.clear_candidates.grid_remove()
+        self.status.set('');self.populate()
+
+    def change_floor(self):
+        self.select()
 
     def select(self,event=None):
-        ids=self.tree.selection()
-        if not ids:return
-        e=self.catalog.by_id[ids[0]]
+        selected=self.tree.selection()
+        if not selected:return
+        layout=selected[0]
+        floor=self.view_floor.get()
+        key='structure_'+layout if floor=='all' else f'hd_{layout}_{floor}'
+        e=self.catalog.by_id[key]
         if self.current is e and self.original is not None:return
         try:
             self.original,self.gallery_labels=self.room_labels.gallery(e)
@@ -212,19 +174,24 @@ class S1Window(tk.Tk):
             messagebox.showerror('图片读取失败',str(exc),parent=self);return
         self.current=e
         if e.get('floor'):self.last_gallery_floor=e['floor']
-        title=e['title'].replace('· 结构','· 三层总览')
-        author=self.catalog.by_id['hd_'+e['layout_id'][3:]+'_B1'].get('author','')
-        self.note.set(f"{title}  |  {self.original.width} × {self.original.height}  |  {author}")
+        self.gallery_title.set(f'布局 {layout}   /   {desktop.FLOORS[floor]}')
+        author=self.catalog.by_id['hd_'+layout+'_B1'].get('author','')
+        self.note.set(f"{self.original.width} × {self.original.height}    ·    {author}")
         self.fit()
 
     def fit(self):
+        self.fitted=True
         if self.original is None:return
-        w=max(1,self.canvas.winfo_width());h=max(1,self.canvas.winfo_height())
-        self.zoom=min(w/self.original.width,h/self.original.height)*.97;self.pan=[0,0];self.render()
+        w=self.canvas.winfo_width();h=self.canvas.winfo_height()
+        if min(w,h)<2:return
+        self.zoom=min(w/self.original.width,h/self.original.height)*.97
+        self.pan=[0,0];self.render()
 
-    def actual_size(self):self.zoom=1;self.pan=[0,0];self.render()
+    def actual_size(self):
+        self.fitted=False;self.zoom=1;self.pan=[0,0];self.render()
 
     def wheel(self,e):
+        self.fitted=False
         old=self.zoom;self.zoom=max(.08,min(5,self.zoom*(1.15 if e.delta>0 else 1/1.15)))
         cx=self.canvas.winfo_width()/2;cy=self.canvas.winfo_height()/2
         self.pan=[e.x-cx-(e.x-cx-self.pan[0])*self.zoom/old,e.y-cy-(e.y-cy-self.pan[1])*self.zoom/old]
@@ -232,10 +199,12 @@ class S1Window(tk.Tk):
 
     def drag_image(self,e):
         if not hasattr(self,'drag'):return
+        self.fitted=False
         self.pan[0]+=e.x-self.drag[0];self.pan[1]+=e.y-self.drag[1];self.drag=(e.x,e.y);self.render()
 
     def render(self):
         if self.original is None:return
+        self.zoom_label.set(f'{self.zoom:.0%}')
         cw=max(1,self.canvas.winfo_width());ch=max(1,self.canvas.winfo_height())
         # Render the visible image crop, so deep zoom does not allocate a giant bitmap.
         x=(cw-self.original.width*self.zoom)/2+self.pan[0];y=(ch-self.original.height*self.zoom)/2+self.pan[1]
@@ -269,8 +238,8 @@ class S1Window(tk.Tk):
             if kind=='error':self.status.set('检索失败：'+data)
             elif not data:self.status.set('没有足够的匹配证据。请换一张暴露更多走廊结构的截图，或从目录手动查看。')
             else:
-                self.kind.set('三层总览');self.populate([r['id'] for r in data])
-                self.status.set('候选顺序：'+' / '.join(f"{r['id'].split('_')[-1]}（结构点 {r['inliers']}）" for r in data)+'。请核对地图；这不是识别成功或准确率。切换图库可恢复全部条目。')
+                self.view_floor.set('all');self.populate([r['id'] for r in data])
+                self.status.set('候选顺序：'+' / '.join(f"{r['id'].split('_')[-1]}（结构点 {r['inliers']}）" for r in data)+'。请对照游戏画面确认。')
         except queue.Empty:pass
         self.after(120,self.poll)
 
@@ -287,11 +256,8 @@ class S1Window(tk.Tk):
 
     def switch_pair(self):
         if not self.current:return
-        to_single=self.current['kind']=='structure'
-        layout=self.current['layout_id'].removeprefix('s1_')
-        target=self.catalog.by_id[f'hd_{layout}_{self.last_gallery_floor}' if to_single else f'structure_{layout}']
-        self.kind.set('高清单层' if to_single else '三层总览')
-        self.populate();self.tree.selection_set(target['id']);self.tree.see(target['id'])
+        target=self.last_gallery_floor if self.view_floor.get()=='all' else 'all'
+        self.floor_buttons[target].invoke()
 
     def open_legacy(self):
         if self.program_panel.phase=='installing':
@@ -343,7 +309,7 @@ def main():
         if token:window.after_idle(acknowledge)
     while True:
         if not (map_root(project_root())/'catalog.json').is_file():
-            setup=tk.Tk();setup.title('MapD5 · 首次使用');setup.geometry('680x355')
+            setup=tk.Tk();setup.title('MapD5 · 首次使用');setup.geometry('680x390');apply_theme(setup)
             tabs=ttk.Notebook(setup);tabs.pack(fill='both',expand=True)
             maps=UpdatePanel(tabs,project_root()/'maps.zip',setup.destroy)
             program=ProgramUpdatePanel(tabs,

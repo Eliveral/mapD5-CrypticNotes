@@ -139,10 +139,11 @@ if __name__ == '__main__':
         import json
         from src.s1_window import S1Window, DEFAULT_OVERLAY_OPACITY
         from src.config import project_root
-        app=S1Window(autostart=False, controls=False, start_hidden=True);app.update();checked=[];alchemy_views=[]
+        app=S1Window(autostart=False, controls=False, start_hidden=True)
+        app.geometry('+30000+30000');app.deiconify();app.update();checked=[];alchemy_views=[]
         assert app.map_key.get() == 'Caps Lock' and app.overlay_style.get() == '高清底图'
         assert app.overlay_alpha.get()==DEFAULT_OVERLAY_OPACITY and app.opacity_label.get()=='28%'
-        assert tuple(app.mode['values'])==('高清单层','三层总览')
+        assert tuple(app.floor_buttons)==('B1','B2','B3','all') and len(app.tree.get_children())==len(app.layouts)
         app.change_opacity('35');assert app.opacity_label.get()=='35%' and app.overlay_alpha.get()==35
         app.change_opacity(str(DEFAULT_OVERLAY_OPACITY))
         from tkinter import ttk
@@ -154,8 +155,8 @@ if __name__ == '__main__':
                 assert window.winfo_children()[-1].image is not None
         window.destroy()
         for e in (e for e in app.catalog.entries if e['kind'] in ('structure','hd')):
-            app.kind.set({'structure':'三层总览','hd':'高清单层'}[e['kind']]);app.populate()
-            app.tree.selection_set(e['id']);app.select();app.update()
+            app.tree.selection_set(e['layout_id'][3:])
+            app.floor_buttons[e['floor'] if e['kind']=='hd' else 'all'].invoke();app.update()
             assert app.current['id']==e['id'] and app.original is not None and len(app.canvas.find_all())==1
             displayed=sorted(text for text,_,_ in app.gallery_labels)
             expected={'B1':[], 'B2':['维修站'], 'B3':['维修站','寰星房']}
@@ -173,14 +174,14 @@ if __name__ == '__main__':
         assert len(checked)==len(app.layouts)*4
         # Exercise the real Tk button callbacks without controlling the game.
         app.withdraw()
-        app.detect_button.invoke()
+        app.detection_action.invoke()
         assert app.live.active and app.live.continuous and not app.live.hidden
         assert '检测已开启' in app.detect_state.get()
-        app.stop_button.invoke()
+        app.detection_action.invoke()
         assert not app.live.active and '检测已停止' in app.detect_state.get()
-        app.detect_button.invoke()
+        app.detection_action.invoke()
         assert app.live.active and app.live.continuous
-        app.stop_button.invoke()
+        app.detection_action.invoke()
         button_check={'start':True,'stop':True,'restart':True,'status':True}
         app.map_key.set('M');app.change_map_key()
         app.map_key.set('Caps Lock');app.change_map_key()
