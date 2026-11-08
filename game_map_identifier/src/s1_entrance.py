@@ -28,7 +28,7 @@ class EntranceMatcher:
         self.matcher=matcher
         path=matcher.catalog.root.parent.parent/'config/s1_hd_registration.json'
         self.registration=json.loads(path.read_text('utf-8'))
-        self.corners={};self.centers={}
+        self.corners={};self.centers={};self.edges={}
 
     def reference(self,fid):
         if fid in self.corners:return self.corners[fid]
@@ -72,7 +72,8 @@ class EntranceMatcher:
             agreement=min(float((samples[observed==v]==v).mean()) for v in (127,255))
             wx,wy=np.rint((wall-offset)/scale).astype(int).T
             inside=(wx>=0)&(wy>=0)&(wx<ref.shape[1])&(wy<ref.shape[0])
-            edges=cv2.morphologyEx(ref,cv2.MORPH_GRADIENT,np.ones((5,5),np.uint8))
+            if fid not in self.edges:self.edges[fid]=cv2.morphologyEx(ref,cv2.MORPH_GRADIENT,np.ones((5,5),np.uint8))
+            edges=self.edges[fid]
             coverage=float(np.count_nonzero(edges[wy[inside],wx[inside]]))/len(wx)
             if agreement<.87 or coverage<.60:continue
             mat=np.array([[scale,0,offset[0]],[0,scale,offset[1]]])/factor
@@ -117,6 +118,8 @@ class EntranceMatcher:
         q,qt=turns(mask,5)
         if len(q)<5 or len(q)>90 or min(np.ptp(q,axis=0))<34:return None
         hits=[]
+        ys,xs=np.nonzero(mask[::3,::3]);xy=np.stack((xs*3,ys*3),axis=1)
+        observed=mask[xy[:,1],xy[:,0]]
         for floor in self.matcher.floors:
             if floor['floor']!='B1' or (layout and floor['layout_id']!=layout):continue
             self.matcher.check_search()
@@ -136,7 +139,10 @@ class EntranceMatcher:
             if not len(scale):continue
             offsets=q[qi[ii]]-r[ri[ii]]*scale[:,None]
             keys=np.column_stack((np.log(scale)/.035,offsets/6)).round().astype(int)
-            _,first,votes=np.unique(keys,axis=0,return_index=True,return_counts=True)
+            keys-=keys.min(axis=0)
+            k0,k1,k2=keys.T.astype(np.int64,copy=False)
+            bins=(k0*(k1.max()+1)+k1)*(k2.max()+1)+k2
+            _,first,votes=np.unique(bins,return_index=True,return_counts=True)
             options=[]
             for j in first[np.argsort(votes)[-24:]]:
                 s=scale[j];off=offsets[j]
@@ -163,11 +169,9 @@ class EntranceMatcher:
                 checked.append(mat)
                 if len(checked)>6:break
                 ref=self.matcher.template(floor)[1]
-                ys,xs=np.nonzero(mask[::3,::3]);xy=np.stack((xs*3,ys*3),axis=1)
                 sample=np.rint((xy-mat[:,2])/mat[0,0]).astype(int)
                 x,y=sample.T;inside=(x>=0)&(y>=0)&(x<ref.shape[1])&(y<ref.shape[0])
                 predicted=np.zeros(len(x),np.uint8);predicted[inside]=ref[y[inside],x[inside]]
-                observed=mask[xy[:,1],xy[:,0]]
                 parts=[predicted[observed==v]==v for v in (127,255)]
                 if any(len(part)<40 for part in parts):continue
                 agreement=min(float(part.mean()) for part in parts)

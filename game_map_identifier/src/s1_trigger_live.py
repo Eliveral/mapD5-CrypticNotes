@@ -225,6 +225,7 @@ class LiveController(base.LiveController):
         token=object()
         self.proof_job=token
         incumbent=state.layout
+        local_layout=state.region_layout
         prior=state.proposal
         cameras=tuple(state.region_cameras)
         interval=.25 if state.blocks_floor('B2') else .65 if state.region_layout or not incumbent else 8.
@@ -234,7 +235,7 @@ class LiveController(base.LiveController):
             reference=None
             try:
                 frame,clear=sample['b2_pixels']
-                hit=self.matcher.confirm_b2(frame,clear,incumbent,entry=entry)
+                hit=self.matcher.confirm_b2(frame,clear,incumbent,entry=entry,local_layout=local_layout)
                 if hit:
                     reference={k:sample[k] for k in ('at','revision','game','roi')}
                     reference.update(floor=hit['floor'],matrix=hit['matrix'],selected_floor='B2',
@@ -552,6 +553,10 @@ class LiveController(base.LiveController):
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
                     scale_reference=reference,zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
                     at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
+                if (check_b1 and not probe and not self.display and last and
+                        self.valid_visit(last,sample,30) and positive_at-last.get('sample_at',0)<1.5 and
+                        'probe' in last and self.matches_clean_view(last,sample)):
+                    check_b1=False
                 if awaiting_opening and presence['visible'] and floor in ('B1','B2','B3','B4'):
                     sample['round_opening']=True
                     if floor in ('B2','B3'):
@@ -775,10 +780,10 @@ class LiveController(base.LiveController):
                 if self.view_cache and self.view_cache.get('selected_floor')=='B1':self.view_cache=None
                 self.view_anchors={k:v for k,v in self.view_anchors.items() if not k.endswith('_B1')}
                 self.due=time.monotonic()+.06
+                if not sample.get('probing'):self.save_sample_async(sample)
                 self.note('b1_unresolved','当前负一画面尚不能确定位置，等待更多固定墙线。')
                 return
         handoff=sample.get('handoff')
-        if handoff:self.check_b1_conflict(sample,handoff[0])
         unusable=sample.get('unusable_pose_fix')
         if unusable:
             fid=unusable['floor']['id']
@@ -833,8 +838,8 @@ class LiveController(base.LiveController):
         if self.app.layout_limit.get()=='自动' and self.round_lock.blocks_floor(sample.get('selected_floor')):
             if self.overlay and self.overlay._visible:self.overlay.hide()
             self.display=self.pending=None
-            if level=='B2' and not sample.get('probing'):self.save_sample_async(sample)
-            self.note('waiting_b2_review',self.round_lock.status())
+            if level in ('B2','B3') and not sample.get('probing'):self.save_sample_async(sample)
+            self.note('waiting_b3_review' if level=='B3' else 'waiting_b2_review',self.round_lock.status(),selected_floor=level)
             return
         if sample.get('handoff'):
             self.pending=None
@@ -898,7 +903,7 @@ class LiveController(base.LiveController):
                 cached['floor']['id'] in self.pose_fixes or
                 zoom_changed(cached.get('zoom'),sample.get('zoom')) or
                 self.layout_limit(sample.get('selected_floor')) not in (None,cached['floor']['layout_id']) or
-                (self.round_lock.layout and self.app.layout_limit.get()=='自动' and not cached.get('unique_layout')) or
+                (sample.get('selected_floor')!='B1' and self.round_lock.layout and self.app.layout_limit.get()=='自动' and not cached.get('unique_layout')) or
                 sample.get('selected_floor') != cached.get('selected_floor') or
                 sample['game'] != cached['game'] or sample['roi'] != cached['roi'] or
                 not same_view(sample['signature'], cached['signature'])): return False
@@ -1020,12 +1025,12 @@ class LiveController(base.LiveController):
         if (self.app.layout_limit.get()!='自动' or not self.round_lock.layout or
                 result['floor']['floor']!='B1' or sample['epoch']!=self.generation):return
         candidates=result.get('possible_layouts') or [result['floor']['layout_id']]
-        if self.round_lock.layout not in candidates:
-            if not self.round_lock.b1_conflict:
-                self.round_lock.landing=LandingReview();self.round_lock.landing.waiting=True
+        if self.round_lock.layout not in candidates and not self.round_lock.b1_conflict:
+            landing=self.round_lock.landing
+            if not (landing.layout or landing.pending or landing.waiting):
+                self.round_lock.landing=LandingReview()
+                self.round_lock.landing.since=sample['at']
             self.round_lock.b1_conflict=True
-            self.display=None
-            if self.overlay and self.overlay._visible:self.overlay.hide()
             self.app.round_status.set(self.round_lock.status())
 
     def allowed_result(self,result):
@@ -1049,7 +1054,6 @@ class LiveController(base.LiveController):
         if not self.scale_agrees(result,sample.get('scale_reference'),sample.get('zoom')):
             self.due=0
             return
-        if result['accepted']:self.check_b1_conflict(sample,result)
         if result['accepted'] and not self.allowed_result(result):
             self.due=0
             self.start_match()
@@ -1066,6 +1070,7 @@ class LiveController(base.LiveController):
             self.start_match()
             return
         if result['accepted']:
+            if self.latest and self.latest['presence']['visible']:self.check_b1_conflict(sample,result)
             fix=sample.get('applied_pose_fix')
             fid=result['floor']['id']
             proposed=self.pose_fixes.get(fid)
@@ -1087,8 +1092,6 @@ class LiveController(base.LiveController):
             if result['floor']['floor']=='B1' and self.app.layout_limit.get()=='自动':
                 self.b1_due=time.monotonic()+.85
                 self.pose_fixes.pop(result['floor']['id'],None)
-                if self.round_lock.layout and self.round_lock.layout not in alternatives:
-                    self.round_lock.b1_conflict=True
                 b1_note='负一候选 '+' / '.join(a[3:] for a in alternatives)
                 self.app.round_status.set(b1_note+' · '+self.round_lock.status())
                 if len(alternatives)>1:

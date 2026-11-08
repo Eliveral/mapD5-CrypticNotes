@@ -82,3 +82,38 @@ def test_new_b1_to_b2_local_evidence_does_not_authorize_b3():
     assert lock.permits_overlay('B2','s1_11',['s1_11']) and lock.blocks_floor('B3')
     lock.observe(partial(2,'s1_12',strong=False))
     assert lock.region_layout is None and lock.blocks_floor('B2') and lock.blocks_floor('B3')
+
+
+def test_verified_b1_can_draw_locally_without_changing_the_round():
+    lock=RoundLock();lock.layout='s1_11'
+    assert lock.permits_overlay('B1','s1_13',['s1_13','s1_02'])
+    assert not lock.permits_overlay('B1','s1_11',['s1_13','s1_02'])
+    assert lock.layout=='s1_11'
+
+
+def test_new_b2_releases_an_inherited_b3_from_an_older_round():
+    lock=RoundLock();lock.layout='s1_11'
+    assert not lock.observe_landing(dict(partial(1,'s1_11'),floor={'floor':'B3','layout_id':'s1_11'}))
+    assert lock.landing.reference is not None
+    for stamp in (2,3,4):
+        lock.observe(dict(partial(stamp,'s1_13',contradicts=True),proof_kind='full'))
+    assert lock.layout=='s1_13' and not lock.blocks_floor('B3') and lock.landing.reference is None
+
+
+def test_contradictory_current_b3_or_fresh_inherited_observation_keeps_review():
+    for contradictory in (True,False):
+        lock=RoundLock();lock.layout='s1_11'
+        lock.observe(dict(partial(2,'s1_13',contradicts=True),proof_kind='full'))
+        lock.observe_landing(dict(partial(2.5,'s1_11'),floor={'floor':'B3','layout_id':'s1_11'},
+                                  conflicting_models=contradictory))
+        for stamp in (3,4):
+            lock.observe(dict(partial(stamp,'s1_13',contradicts=True),proof_kind='full'))
+        assert lock.layout=='s1_13' and lock.blocks_floor('B3')
+
+
+def test_b3_direct_start_still_waits_until_b2_is_fully_confirmed():
+    lock=RoundLock();lock.observe_opening('B3',1)
+    for t in (2,3):lock.observe(dict(partial(t,'s1_13'),proof_kind='full'))
+    assert lock.blocks_floor('B3')
+    lock.observe(dict(partial(4,'s1_13'),proof_kind='full'))
+    assert not lock.blocks_floor('B3')

@@ -13,7 +13,7 @@ from .s1_station import StationMatcher
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
 from .s1_pose_check import PoseCheck
-from .s1_b2_review import compare_walls
+from .s1_b2_review import compare_walls,check_partial_b2_edges
 
 
 def map_area(image):
@@ -446,7 +446,7 @@ class LiveMatcher(FloorMatcher):
             hit['disjoint_proof']=len(verified)==2
         return hit
 
-    def confirm_b2(self,image,clear=None,incumbent=None,entry=False):
+    def confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.
         hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)
@@ -482,6 +482,8 @@ class LiveMatcher(FloorMatcher):
                                           and len(wall['cells'])>=10 and np.percentile(errors,90)<image.shape[0]*.008)
         result['contradicts']=bool(incumbent and incumbent!=wall['floor']['layout_id'] and
                                    support.get(incumbent,0)<.70*wall['inliers'])
+        if not full and wall['floor']['layout_id']!=local_layout and (result['contradicts'] or not incumbent):
+            result['local_verified']=check_partial_b2_edges(self,image,map_area,clear,wall,support)
         return result
 
     @staticmethod

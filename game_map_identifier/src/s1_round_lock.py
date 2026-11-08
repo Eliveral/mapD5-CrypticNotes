@@ -47,6 +47,7 @@ class RoundLock:
         self.layout=None
         self.reference=None
         self.proposal=None
+        self.proposal_since=-1.
         self.proposal_count=0
         self.cells=set()
         self.uncertain=False
@@ -105,9 +106,9 @@ class RoundLock:
 
     def permits_overlay(self, level, layout, candidates):
         if level=='B1':
-            # Independent B1 recognition can dispute a stale lock. Until B2
-            # decides, only a common region including the lock can be drawn.
-            return not self.layout or self.layout in candidates
+            # The entrance matcher registers this floor independently. Multiple
+            # candidates render only their intersection; none of them votes on B2.
+            return layout in candidates
         if self.blocks_floor(level):return False
         expected=self.preferred(level) if level=='B3' else self.region_layout or self.layout
         return not expected or (layout==expected and all(v==expected for v in candidates))
@@ -153,6 +154,7 @@ class RoundLock:
             return False
         self.uncertain=False
         if not self.proposal or layout!=self.proposal['floor']['layout_id']:
+            self.proposal_since=stamp
             self.proposal_count=0;self.cells.clear()
             self.region_layout=None;self.region_cameras.clear()
         old_region=self.region_layout
@@ -175,10 +177,18 @@ class RoundLock:
         self.cells.update(cells);self.proposal_count+=1
         if not self.layout:self.candidate,self.count=layout,self.proposal_count
         if self.proposal_count==self.required:
-            if (self.layout and self.layout!=layout and self.landing.reference and
-                    not self.landing.layout and self.landing.reference['floor']['layout_id']!=layout):
+            landing=self.landing
+            inherited_old=(self.layout and self.layout!=layout and landing.reference
+                           and landing.reference['floor']['layout_id']!=layout)
+            unobserved_landing=landing.waiting and landing.at<0
+            if not landing.layout and not landing.pending and (unobserved_landing or
+                    (inherited_old and not landing.waiting)):
+                # The new B2 has passed all confirmations. A prior inherited
+                # camera is obsolete; normal handoff must still verify target walls.
+                # An observed contradictory or independent B3 keeps its own review.
                 self.landing=LandingReview()
-                self.landing.waiting=True
+                self.landing.since=stamp
+                self.landing.waiting=bool(inherited_old and landing.at>=self.proposal_since)
             self.recheck_b2_after_landing=False
             self.layout=layout
             self.region_layout=None;self.region_cameras.clear()
