@@ -35,8 +35,22 @@ class OriginalMap:
         if len(self.recent)>3:self.recent.popitem(last=False)
         return image, matrix, source_id
 
-    def render(self, result, size):
+    def render(self, result, size, clip=None):
         image, matrix, source_id = self.source(result['floor'])
         transform = np.vstack([result['matrix'], [0,0,1]]) @ np.vstack([matrix, [0,0,1]])
         result['display_source'] = source_id
-        return cv2.warpAffine(image, transform[:2], tuple(size), flags=cv2.INTER_LINEAR)
+        if clip is None:
+            return cv2.warpAffine(image,transform[:2],tuple(size),flags=cv2.INTER_LINEAR)
+        left,top,right,bottom=clip
+        height,width=image.shape[:2]
+        corners=np.float64([[0,0,1],[width,0,1],[0,height,1],[width,height,1]])@transform[:2].T
+        minimum=np.floor(corners.min(axis=0)-2).astype(int)
+        maximum=np.ceil(corners.max(axis=0)+2).astype(int)
+        left,top=max(left,minimum[0]),max(top,minimum[1])
+        right,bottom=min(right,maximum[0]),min(bottom,maximum[1])
+        canvas=np.zeros((size[1],size[0],3),np.uint8)
+        if left>=right or top>=bottom:return canvas
+        transform[:2,2]-=(left,top)
+        cv2.warpAffine(image,transform[:2],(right-left,bottom-top),dst=canvas[top:bottom,left:right],
+                       flags=cv2.INTER_LINEAR)
+        return canvas

@@ -1,6 +1,7 @@
 """Check a camera against the walls in the art actually being projected."""
 from functools import lru_cache
 from types import SimpleNamespace
+from .s1_view_motion import exclude_map_hud
 import cv2
 import numpy as np
 from .s1_alignment import geometry
@@ -100,7 +101,7 @@ class PoseCheck:
     def check(self,frame,area,clear,floor,prior,style,confirmed):
         factor=min(1.,1024/frame.shape[1])
         small=cv2.resize(frame,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
-        valid=area(small)
+        valid=exclude_map_hud(area(small).copy())
         if clear is not None:
             mask=cv2.resize(clear,(small.shape[1],small.shape[0]),interpolation=cv2.INTER_AREA)
             valid &= cv2.erode(np.uint8(mask==255)*255,np.ones((5,5),np.uint8))

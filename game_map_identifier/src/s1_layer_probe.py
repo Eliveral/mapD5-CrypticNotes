@@ -8,7 +8,7 @@ import numpy as np
 from copy import copy
 from .s1_alignment import geometry
 from .s1_live_match import map_area
-from .s1_view_motion import zoom_position,zoom_changed
+from .s1_view_motion import zoom_position,zoom_changed,exclude_map_hud
 
 
 class LayerProbe:
@@ -32,7 +32,7 @@ class LayerProbe:
         self.area=(cv2.dilate(signature,np.ones((13,13),np.uint8))>0) & (self.label_area==0)
         self.rooms=signature>0
         self.known=(cv2.resize(known_pixels,self.size,interpolation=cv2.INTER_AREA)>=252) if known_pixels is not None else np.ones(signature.shape,bool)
-        self.area &= self.known
+        self.area &= self.known & (exclude_map_hud(map_area(self.clean))>0)
         self.update_edges()
 
     def update_edges(self):
@@ -54,6 +54,7 @@ class LayerProbe:
         result.zoom=zoom_position(clean)
         result.clean = cv2.resize(clean,self.size).astype(np.float32)
         result.area = (cv2.dilate(signature,np.ones((13,13),np.uint8)) > 0) & (self.label_area==0)
+        result.area &= exclude_map_hud(map_area(result.clean))>0
         result.rooms=signature>0
         result.known=np.ones(signature.shape,bool)
         result.update_edges()

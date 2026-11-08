@@ -85,12 +85,15 @@ class LiveMatcher(FloorMatcher):
         return hit
 
     @staticmethod
-    def follow_anchors(features,floor,anchors):
+    def follow_anchors(features,floor,anchors,quick=False):
         for anchor in anchors:
-            relative=anchor['view_features'].motion_to(features)
+            if quick:
+                relative=anchor['view_features'].camera_motion(features)
+            else:
+                relative=anchor['view_features'].motion_to(features)
             if relative is None:continue
             change,count,agreement=relative
-            if abs(change[0,0]-1)>.06 and len(anchors)>1:
+            if not quick and abs(change[0,0]-1)>.06 and len(anchors)>1:
                 # Correct accumulated scale error against an independently registered,
                 # more detailed view if the current map still overlaps it.
                 reference=max((v for v in anchors if v.get('independent') or v.get('result')),
@@ -104,7 +107,9 @@ class LiveMatcher(FloorMatcher):
             return dict(accepted=True,floor=floor,matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
                         inliers=count,score=agreement,consistency=agreement,error_px=None,
                         possible_layouts=[floor['layout_id']],candidates=[],segmentation='view_motion',
-                        search='view_zoom' if abs(change[0,0]-1)>.06 else 'view_motion',handoff_origin=anchor.get('handoff_origin'))
+                        search=('camera_zoom' if abs(change[0,0]-1)>.06 else 'camera_pan') if quick else
+                               ('view_zoom' if abs(change[0,0]-1)>.06 else 'view_motion'),
+                        handoff_origin=anchor.get('handoff_origin'))
         return None
 
     def follow_known(self,features,prior,target,anchors,image=None,source_anchor=None,locked_layout=None):
@@ -184,8 +189,12 @@ class LiveMatcher(FloorMatcher):
 
     def render_live(self, match, frame, style='original_clean', manual=False):
         height,width = frame.shape[:2]
-        rendered = self.render(match,(width,height),style)
-        allowed = None if manual else map_area(rendered)
+        allowed=None if manual else map_area(frame)
+        if allowed is not None and style!='structure':
+            x,y,w,h=cv2.boundingRect(allowed)
+            rendered=self.original.render(match,(width,height),clip=(x,y,x+w,y+h))
+        else:
+            rendered=self.render(match,(width,height),style)
         # Leave the actual explored area and its player/item icons visible.
         factor = min(1., 900/max(width,height))
         small = cv2.resize(frame,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)

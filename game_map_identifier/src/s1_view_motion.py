@@ -29,11 +29,20 @@ def zoom_changed(before,after):
     return before is not None and after is not None and abs(before-after)>.0035
 
 
+def exclude_map_hud(mask):
+    # Team names, portraits and counters stay at fixed screen coordinates
+    # while the underlying floor moves. The bottom-right book does the same.
+    h,w=mask.shape
+    mask[:round(h*.31),:round(w*.345)]=0
+    mask[round(h*.835):,round(w*.83):]=0
+    return mask
+
+
 class ViewFeatures:
     def __init__(self,image,area,unpainted=None):
         self.factor=min(1.,720/image.shape[1])
         small=cv2.resize(image,None,fx=self.factor,fy=self.factor,interpolation=cv2.INTER_AREA)
-        valid=area(small)
+        valid=exclude_map_hud(area(small).copy())
         if unpainted is not None:
             clear=cv2.resize(unpainted,(small.shape[1],small.shape[0]),interpolation=cv2.INTER_AREA)
             valid=cv2.bitwise_and(valid,np.uint8(clear>=252)*255)
@@ -209,6 +218,76 @@ class ViewFeatures:
         if len(chosen)<5:return None
         src=np.float32([self.points[p.queryIdx] for p in chosen.values()])
         dst=np.float32([other.points[p.trainIdx] for p in chosen.values()])
+        return self.fit_motion(other,src,dst)
+
+    @cached_property
+    def flow_corners(self):
+        mask=cv2.dilate(np.uint8(self.geom>0)*255,np.ones((5,5),np.uint8))&self.valid
+        return cv2.goodFeaturesToTrack(self.gray,64,.025,6,mask=mask)
+
+    @cached_property
+    def translation_image(self):
+        return cv2.resize(self.geom,None,fx=.5,fy=.5,interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    @cached_property
+    def zoom_keypoints(self):
+        mask=cv2.dilate(np.uint8(self.geom>0)*255,np.ones((5,5),np.uint8))&self.valid
+        points,descriptors=cv2.ORB_create(nfeatures=450,edgeThreshold=12,fastThreshold=8).detectAndCompute(self.gray,mask)
+        return np.float32([p.pt for p in points]).reshape(-1,2),descriptors
+
+    def camera_zoom(self,other):
+        src,a=self.zoom_keypoints
+        dst,b=other.zoom_keypoints
+        if a is None or b is None or min(len(a),len(b))<8:return None
+        pairs=cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(a,b,k=2)
+        unique={}
+        for first,second in pairs:
+            if first.distance<.74*second.distance:
+                old=unique.get(first.trainIdx)
+                if old is None or first.distance<old.distance:unique[first.trainIdx]=first
+        if len(unique)<8:return None
+        left=np.float32([src[m.queryIdx] for m in unique.values()])
+        right=np.float32([dst[m.trainIdx] for m in unique.values()])
+        hit=self.fit_motion(other,left,right,whole_view=True)
+        if not hit or hit[1]<7:return None
+        if zoom_changed(self.zoom,other.zoom) and (other.zoom-self.zoom)*(hit[0][0,0]-1)>=0:return None
+        return hit
+
+    def camera_motion(self,other):
+        if zoom_changed(self.zoom,other.zoom):
+            return self.camera_zoom(other)
+        return self.camera_flow(other) or self.camera_zoom(other)
+
+    def camera_flow(self,other):
+        # Only used with an identified floor. Measure several of its visible
+        # corners, starting at the translation of the room/corridor silhouette.
+        corners=self.flow_corners
+        if corners is None or len(corners)<6 or self.gray.shape!=other.gray.shape:return None
+        shift,response=cv2.phaseCorrelate(self.translation_image,other.translation_image)
+        if not np.isfinite(shift).all() or response<.09:return None
+        initial=corners.copy()+np.float32(shift)*2
+        options=dict(winSize=(17,17),maxLevel=2,
+                     criteria=(cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT,18,.02),
+                     flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
+        moved,status,error=cv2.calcOpticalFlowPyrLK(self.gray,other.gray,corners,initial,**options)
+        back,reverse,_=cv2.calcOpticalFlowPyrLK(other.gray,self.gray,moved,corners.copy(),**options)
+        xy=np.rint(moved[:,0]).astype(int)
+        h,w=other.gray.shape
+        inside=(xy[:,0]>=0)&(xy[:,0]<w)&(xy[:,1]>=0)&(xy[:,1]<h)
+        keep=inside&(status[:,0]>0)&(reverse[:,0]>0)&(error[:,0]<16)
+        keep&=np.linalg.norm(back[:,0]-corners[:,0],axis=1)<1.
+        keep[inside]&=other.valid[xy[inside,1],xy[inside,0]]>0
+        if keep.sum()<6:return None
+        hit=self.fit_motion(other,corners[keep,0],moved[keep,0],flow=True,whole_view=True)
+        if not hit:return None
+        scale=hit[0][0,0]
+        if zoom_changed(self.zoom,other.zoom):
+            if (other.zoom-self.zoom)*(scale-1)>=0:return None
+        elif self.zoom is not None and other.zoom is not None and abs(scale-1)>.025:
+            return None
+        return hit
+
+    def fit_motion(self,other,src,dst,flow=False,whole_view=False):
         mat,inliers=cv2.estimateAffinePartial2D(src,dst,method=cv2.RANSAC,ransacReprojThreshold=2.,maxIters=400)
         if mat is None:return None
         ok=inliers.ravel().astype(bool)
@@ -222,6 +301,9 @@ class ViewFeatures:
         x,y=src[ok],dst[ok]
         cx,cy=x.mean(axis=0),y.mean(axis=0)
         scale=np.sum((x-cx)*(y-cy))/max(np.sum((x-cx)**2),1)
+        if flow and self.zoom is not None and other.zoom is not None and not zoom_changed(self.zoom,other.zoom):
+            if abs(scale-1)>.025:return None
+            scale=1.
         offset=cy-scale*cx
         if not .20<scale<5. or np.median(np.linalg.norm(x*scale+offset-y,axis=1))>1.5:return None
         mat=np.array([[scale,0,offset[0]],[0,scale,offset[1]]],dtype=np.float64)
@@ -232,6 +314,15 @@ class ViewFeatures:
         # corridor. Verify matched neighborhoods on separate pieces of wall.
         neighborhoods=np.zeros((h,w),np.uint8)
         for point in y:cv2.circle(neighborhoods,tuple(np.rint(point).astype(int)),12,255,-1)
+        if whole_view:
+            previous=(warped>0)&valid
+            present=(other.geom>0)&valid
+            if min(previous.sum(),present.sum())<50:return None
+            shared=((warped==other.geom)&previous).sum()
+            # Allow a newly revealed room. A static fragment alone cannot
+            # certify a camera when most visible map edges disagree.
+            if shared<.58*min(previous.sum(),present.sum()) or shared<.27*max(previous.sum(),present.sum()):
+                return None
         valid &= neighborhoods>0
         agreement=[]
         for label in (127,255):
