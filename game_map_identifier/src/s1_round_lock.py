@@ -54,23 +54,20 @@ class RoundLock:
         self.recheck_b2_after_landing=False
         self.b2_arrival=False
         self.b2_since=-1.
-        self.direct_b2=False
+        self.opening_floor=None
 
-    def enter_b2(self,at,new_visit,previous):
-        self.b2_arrival=True
-        self.b2_since=at
-        if new_visit:
-            self.direct_b2=previous!='B1'
-            self.proposal=None;self.proposal_count=0;self.cells.clear()
-            if not self.layout:self.candidate=None;self.count=0
-
-    def enter_b3(self,at,new_visit):
-        if new_visit:
-            prior=self.landing.layout
-            self.landing=LandingReview()
-            self.landing.layout=prior
-        self.landing.waiting=True
-        self.landing.since=at
+    def observe_opening(self, level, at):
+        """Only the first readable floor of a round is its random starting point."""
+        if self.opening_floor is not None or level not in ('B1','B2','B3','B4'):
+            return False
+        self.opening_floor=level
+        if level=='B2':
+            self.b2_arrival=True
+            self.b2_since=at
+        elif level=='B3':
+            self.landing.waiting=True
+            self.landing.since=at
+        return True
 
     @property
     def challenger(self):
@@ -136,8 +133,6 @@ class RoundLock:
         if self.layout and not reference.get('contradicts'):return False
         if not self.proposal or layout!=self.proposal['floor']['layout_id']:
             self.proposal_count=0;self.cells.clear()
-            if self.layout and self.landing.layout!=layout:
-                self.landing=LandingReview();self.landing.waiting=True
         cells=set(reference.get('cells',()))
         novel=cells-self.cells
         if reference.get('proof_kind')=='partial' and self.proposal_count and len(novel)<3:return False
@@ -145,10 +140,10 @@ class RoundLock:
         self.cells.update(cells);self.proposal_count+=1
         if not self.layout:self.candidate,self.count=layout,self.proposal_count
         if self.proposal_count==self.required:
-            if self.layout and self.layout!=layout and self.landing.layout!=layout:
-                require_b3=self.landing.waiting or self.b2_arrival or self.direct_b2
+            if (self.layout and self.layout!=layout and self.landing.reference and
+                    not self.landing.layout and self.landing.reference['floor']['layout_id']!=layout):
                 self.landing=LandingReview()
-                self.landing.waiting=require_b3
+                self.landing.waiting=True
             self.recheck_b2_after_landing=False
             self.layout=layout
             self.b2_arrival=False
@@ -165,7 +160,7 @@ class RoundLock:
             return f'负三已确认 {self.landing.layout[3:]} · 回负二时重新核对'
         if self.b1_conflict:return '负一与此前布局不符 · 等待重新核对负二'
         if self.landing.pending:return '负三出现不同的固定结构 · 核对 '+self.landing.pending[3:]
-        if self.landing.waiting:return '正在独立核对传送后的负三位置'
+        if self.landing.waiting:return '正在用负三固定墙线核对当前地图'
         if self.landing.layout and self.landing.layout!=self.layout:
             b2=self.layout[3:] if self.layout else '未确认'
             return f'负二 {b2} · 负三独立确认 {self.landing.layout[3:]}'

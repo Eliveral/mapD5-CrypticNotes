@@ -187,6 +187,16 @@ class ViewFeatures:
         hit=self.patch_motion(other) if len(self.points)>=20 else None
         return hit if hit is not None else self.scale_match(other)
 
+    def same_pixels(self, other):
+        if self.geom.shape!=other.geom.shape:
+            return False
+        valid=(self.valid>0)&(other.valid>0)
+        support=((self.geom>0)|(other.geom>0))&valid
+        if support.sum()<100 or (self.geom[support]!=other.geom[support]).mean()>.035:
+            return False
+        delta=cv2.absdiff(self.gray,other.gray)[support]
+        return delta.mean()<4 and (delta>15).mean()<.06
+
     def keypoint_motion(self,other):
         if self.descriptors is None or other.descriptors is None or min(len(self.points),len(other.points))<5:return None
         pairs=cv2.BFMatcher().knnMatch(self.descriptors,other.descriptors,k=2)

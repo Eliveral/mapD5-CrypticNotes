@@ -36,9 +36,8 @@ if __name__ == '__main__':
         for i,arg in enumerate(sys.argv):
             if arg=='--enter-floor':
                 level=sys.argv[i+1]
-                if level=='B2':lock.enter_b2(i,True,prior_level if prior else None)
-                elif level=='B3':lock.enter_b3(i,True)
-                else:raise ValueError('回放落点须为 B2 或 B3')
+                if level not in ('B1','B2','B3','B4'):raise ValueError('无效初始楼层')
+                lock.observe_opening(level,i)
                 continue
             if arg=='--landing-frame':
                 image=read_image(Path(sys.argv[i+1]))
@@ -113,7 +112,7 @@ if __name__ == '__main__':
         rendered = matcher.render_live(r,frame) if r['accepted'] else None
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
-                'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
+                'opening_floor':lock.opening_floor,'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
                 'b3_local':lock.landing.layout,'b3_pending':lock.landing.pending,
                 'waiting_b2':lock.b2_arrival,'waiting_b3':lock.landing.waiting,
                 'pose_adjustment':correction and correction['adjustment'],

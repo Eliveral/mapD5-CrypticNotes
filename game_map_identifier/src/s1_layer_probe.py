@@ -38,7 +38,9 @@ class LayerProbe:
     def update_edges(self):
         g=geometry(self.clean.astype(np.uint8))
         self.edge_area=(self.coverage[:,:,0]<.02)&(self.label_area==0)&self.area
-        self.walls=(cv2.morphologyEx(g,cv2.MORPH_GRADIENT,np.ones((3,3),np.uint8))>0)&self.edge_area
+        edges=cv2.morphologyEx(g,cv2.MORPH_GRADIENT,np.ones((3,3),np.uint8))>0
+        self.detail=edges&self.area
+        self.walls=edges&self.edge_area
 
     def uncovered_frame(self,frame):
         # Use actual screen pixels only. Anything painted by the previous
@@ -66,13 +68,17 @@ class LayerProbe:
         clear=self.known&(self.coverage[:,:,0]<.02)&(self.label_area==0)&(map_area(hsv)>0)
         if np.count_nonzero(rooms & ~self.rooms & clear)>max(40,self.rooms.sum()*.055):
             return False
-        a = round(max(.15,min(.90,alpha))*255)/255
+        a = round(max(0.,min(.90,alpha))*255)/255
         transmitted = 1-self.coverage*a
         restored = np.clip((raw-self.ink*a)/transmitted,0,255)
         for sample in (raw, restored):
-            delta = np.max(np.abs(sample-self.clean),axis=2)[self.area]
-            if np.mean(delta) < 5 and np.mean(delta > 16) < .06:
-                return True
+            diff=np.max(np.abs(sample-self.clean),axis=2)
+            delta=diff[self.area]
+            if np.mean(delta)<5 and np.mean(delta>16)<.06:
+                # A mostly dark rectangle can remain similar when the few
+                # actual walls inside it move. Give those edges their own vote.
+                if self.detail.sum()<24 or (diff[self.detail]>16).mean()<.12:
+                    return True
         # Animated fog, highlights and the player icon may change RGB without
         # moving the room walls. Check structure in untouched pixels separately.
         if self.walls.sum()<70:return False
