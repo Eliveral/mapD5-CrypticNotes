@@ -182,6 +182,22 @@ class LiveController(base.LiveController):
             hit['scale']=float(np.linalg.norm(hit['matrix'][0,:2]))
         return hit
 
+    @staticmethod
+    def corroborates_b2_camera(prior,cameras,current):
+        if (not prior or not cameras or not prior.get('region_verified') or not current.get('region_verified')
+                or prior['floor']['id']!=current['floor']['id'] or prior['game']!=current['game']
+                or prior['roi']!=current['roi'] or prior['revision']!=current['revision']):
+            return False
+        h,w=current['game'].bounds[3],current['game'].bounds[2]
+        samples=np.float64([[w*.42,h*.35,1],[w*.68,h*.66,1],[w*.55,h*.5,1]]).T
+        native=np.linalg.inv(np.vstack((current['matrix'],[0,0,1])))@samples
+        if any(np.linalg.norm((camera-current['matrix'])@native,axis=0).max()<max(24.,h*.04) for camera in cameras):
+            return False
+        moved=prior['view_features'].camera_motion(current['view_features'])
+        if moved is None:return False
+        tracked=moved[0]@np.vstack((prior['matrix'],[0,0,1]))
+        return np.linalg.norm((tracked-current['matrix'])@native,axis=0).max()<max(5.,h*.008)
+
     def begin_proof(self,sample):
         if 'b2_pixels' not in sample or self.app.layout_limit.get()!='自动':return
         if self.proof_job:
@@ -192,6 +208,8 @@ class LiveController(base.LiveController):
         token=object()
         self.proof_job=token
         incumbent=state.layout
+        prior=state.proposal
+        cameras=tuple(state.region_cameras)
         interval=.25 if state.blocks_floor('B2') else 8. if incumbent else .65
         self.proof_due=sample['at']+interval
         entry=state.b2_arrival or state.recheck_b2_after_landing
@@ -208,7 +226,9 @@ class LiveController(base.LiveController):
                                      proof_kind=hit.get('proof_kind','full'),cells=hit.get('cells',()),
                                      conflicting_models=hit.get('conflicting_models',False),
                                      contradicts=hit.get('contradicts',False),view_features=ViewFeatures(frame,map_area,clear),
-                                     inliers=hit['inliers'])
+                                     inliers=hit['inliers'],region_verified=hit.get('region_verified',False))
+                    if entry and not incumbent:
+                        reference['camera_support']=self.corroborates_b2_camera(prior,cameras,reference)
             except Exception as exc:
                 self.events.put(('b2_check_error',str(exc)))
             finally:
@@ -413,7 +433,7 @@ class LiveController(base.LiveController):
         if (manual or not self.valid_visit(last,dict(game=game,roi=roi),lifetime)
                 or not last.get('selected_floor')):last=None
         floor_limit=self.app.floor_limit.get()
-        verify=(not manual and not self.warming and not self.proof_job and
+        verify=(not manual and not self.warming and
                 self.app.layout_limit.get()=='自动' and time.monotonic()>=self.proof_due)
         style='structure' if self.app.overlay_style.get()=='结构' else 'original_clean'
         b1_due=self.b1_due
@@ -736,6 +756,7 @@ class LiveController(base.LiveController):
         if self.app.layout_limit.get()=='自动' and self.round_lock.blocks_floor(sample.get('selected_floor')):
             if self.overlay and self.overlay._visible:self.overlay.hide()
             self.display=self.pending=None
+            if level=='B2' and not sample.get('probing'):self.save_sample_async(sample)
             self.note('waiting_b2_review',self.round_lock.status())
             return
         if sample.get('handoff'):

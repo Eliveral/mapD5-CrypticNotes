@@ -366,6 +366,11 @@ class LiveMatcher(FloorMatcher):
             full.update(proof_kind='full',cells=wall['cells'])
             result=full
         else:result=wall
+        result['region_verified']=bool(wall.get('region_verified'))
+        if full and result['region_verified']:
+            points=np.c_[full['points'],np.ones(len(full['points']))].T
+            delta=(wall['matrix']-full['matrix'])@np.linalg.inv(np.vstack((full['matrix'],[0,0,1])))@points
+            result['region_verified']=np.percentile(np.linalg.norm(delta,axis=0),75)<image.shape[0]*.008
         result['contradicts']=bool(incumbent and incumbent!=wall['floor']['layout_id'] and
                                    support.get(incumbent,0)<.70*wall['inliers'])
         return result

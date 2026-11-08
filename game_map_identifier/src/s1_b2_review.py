@@ -45,6 +45,10 @@ def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None):
                 sum(v>=max(10,n*.70) for k,v in score.items() if k!=incumbent)>=2):
             best['conflicting_models']=True
         else:return None,score
+    if level=='B2':
+        best['region_verified']=(not best.get('conflicting_models') and len(rooms)>=3 and
+                                 n>=18 and len(best['cells'])>=10 and best['consistency']>=.90
+                                 and n-rival>=max(6,n*.35))
     method=level.lower()+'_wall_review'
     best.update(search=method,segmentation=method,proof_kind='partial')
     return best,score

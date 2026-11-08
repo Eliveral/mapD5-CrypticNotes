@@ -55,6 +55,8 @@ class RoundLock:
         self.b2_arrival=False
         self.b2_since=-1.
         self.opening_floor=None
+        self.region_layout=None
+        self.region_cameras=[]
 
     def observe_opening(self, level, at):
         """Only the first readable floor of a round is its random starting point."""
@@ -86,7 +88,9 @@ class RoundLock:
         disputed=bool(self.uncertain or self.challenger or self.b1_conflict)
         if level=='B3':
             return self.landing.waiting or bool(self.landing.pending) or ((disputed or self.b2_arrival) and not self.landing.layout)
-        return (disputed or self.recheck_b2_after_landing or self.b2_arrival) and level!='B1'
+        local=(level=='B2' and not self.layout and self.region_layout is not None and
+               self.region_layout==self.preferred('B2'))
+        return (disputed or self.recheck_b2_after_landing or (self.b2_arrival and not local)) and level!='B1'
 
     def observe_landing(self,hit):
         review=self.landing
@@ -103,7 +107,7 @@ class RoundLock:
             # decides, only a common region including the lock can be drawn.
             return not self.layout or self.layout in candidates
         if self.blocks_floor(level):return False
-        expected=self.preferred(level) if level=='B3' else self.layout
+        expected=self.preferred(level) if level=='B3' else self.layout or (self.region_layout if level=='B2' else None)
         return not expected or (layout==expected and all(v==expected for v in candidates))
 
     def observe(self,reference):
@@ -116,6 +120,7 @@ class RoundLock:
         if reference.get('conflicting_models'):
             changed=not self.uncertain
             self.uncertain=True
+            self.region_layout=None;self.region_cameras.clear()
             self.proposal=None;self.proposal_count=0;self.cells.clear()
             return changed
         previously_uncertain=self.uncertain
@@ -133,9 +138,17 @@ class RoundLock:
         if self.layout and not reference.get('contradicts'):return False
         if not self.proposal or layout!=self.proposal['floor']['layout_id']:
             self.proposal_count=0;self.cells.clear()
+            self.region_layout=None;self.region_cameras.clear()
+        old_region=self.region_layout
+        if self.opening_floor=='B2' and self.b2_arrival and not self.layout and reference.get('region_verified'):
+            self.region_layout=layout
         cells=set(reference.get('cells',()))
         novel=cells-self.cells
-        if reference.get('proof_kind')=='partial' and self.proposal_count and len(novel)<3:return False
+        corroborated=(self.region_layout==layout and not self.layout and reference.get('camera_support'))
+        if reference.get('proof_kind')=='partial' and self.proposal_count and len(novel)<3 and not corroborated:
+            return old_region!=self.region_layout
+        if self.region_layout==layout and reference.get('matrix') is not None:
+            self.region_cameras.append(reference['matrix'].copy())
         self.proposal=reference
         self.cells.update(cells);self.proposal_count+=1
         if not self.layout:self.candidate,self.count=layout,self.proposal_count
@@ -146,6 +159,7 @@ class RoundLock:
                 self.landing.waiting=True
             self.recheck_b2_after_landing=False
             self.layout=layout
+            self.region_layout=None;self.region_cameras.clear()
             self.b2_arrival=False
             self.b1_conflict=False
             self.reference=reference
@@ -164,6 +178,7 @@ class RoundLock:
         if self.landing.layout and self.landing.layout!=self.layout:
             b2=self.layout[3:] if self.layout else '未确认'
             return f'负二 {b2} · 负三独立确认 {self.landing.layout[3:]}'
+        if self.b2_arrival and self.region_layout:return f'负二局部已定位 {self.region_layout[3:]} · 本局核对 {self.proposal_count}/{self.required}'
         if self.b2_arrival:return f'负二落点重新核对 · {self.proposal_count}/{self.required}'
         if self.layout:return '本局已锁定 · 布局 '+self.layout[3:]+'（负二已确认 3 次）'
         if self.candidate:return f'负二核对 {self.count}/{self.required} · 布局 {self.candidate[3:]}'
