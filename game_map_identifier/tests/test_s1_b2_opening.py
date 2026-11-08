@@ -47,3 +47,38 @@ def test_corroborated_separate_cameras_can_complete_cold_lock():
     assert not lock.permits_overlay('B3','s1_05',['s1_05'])
     lock.observe(partial(3,camera_support=True))
     assert lock.layout=='s1_05' and lock.permits_overlay('B3','s1_05',['s1_05'])
+
+
+def test_replacement_visible_on_b2_without_promoting_round():
+    lock=RoundLock();lock.layout='s1_14';lock.b1_conflict=True
+    proof=partial(1,'s1_11',strong=False,contradicts=True,local_verified=True)
+    assert lock.observe(proof)
+    assert lock.proposal_count==1 and lock.layout=='s1_14'
+    assert lock.permits_overlay('B2','s1_11',['s1_11'])
+    assert not lock.permits_overlay('B2','s1_14',['s1_14'])
+    assert not lock.permits_overlay('B3','s1_11',['s1_11'])
+    assert not lock.permits_overlay('B3','s1_14',['s1_14'])
+    lock.observe(partial(2,'s1_12',conflicting_models=True))
+    assert lock.blocks_floor('B2') and lock.region_layout is None
+    lock.observe(partial(3,'s1_12',contradicts=False))
+    assert lock.blocks_floor('B2') and lock.layout=='s1_14'
+
+
+def test_distinct_strong_regions_can_grant_only_local_replacement():
+    lock=RoundLock();lock.layout='s1_14'
+    p=partial(1,'s1_11',contradicts=True)
+    lock.observe(p);lock.observe(dict(p,at=2))
+    assert lock.blocks_floor('B2') and lock.proposal_count==1
+    lock.observe(dict(p,at=3,cells={(9,1),(10,3),(14,2),(15,4)}))
+    assert lock.region_layout=='s1_11' and lock.layout=='s1_14'
+    assert not lock.blocks_floor('B2') and lock.blocks_floor('B3')
+    lock.observe(partial(4,'s1_14',strong=True))
+    assert lock.region_layout is None and lock.permits_overlay('B2','s1_14',['s1_14'])
+
+
+def test_new_b1_to_b2_local_evidence_does_not_authorize_b3():
+    lock=RoundLock();lock.observe_opening('B1',0)
+    lock.observe(partial(1,'s1_11',strong=True))
+    assert lock.permits_overlay('B2','s1_11',['s1_11']) and lock.blocks_floor('B3')
+    lock.observe(partial(2,'s1_12',strong=False))
+    assert lock.region_layout is None and lock.blocks_floor('B2') and lock.blocks_floor('B3')

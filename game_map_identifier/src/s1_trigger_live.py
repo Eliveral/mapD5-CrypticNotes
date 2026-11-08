@@ -227,7 +227,7 @@ class LiveController(base.LiveController):
         incumbent=state.layout
         prior=state.proposal
         cameras=tuple(state.region_cameras)
-        interval=.25 if state.blocks_floor('B2') else 8. if incumbent else .65
+        interval=.25 if state.blocks_floor('B2') else .65 if state.region_layout or not incumbent else 8.
         self.proof_due=sample['at']+interval
         entry=state.b2_arrival or state.recheck_b2_after_landing
         def verify():
@@ -243,7 +243,8 @@ class LiveController(base.LiveController):
                                      proof_kind=hit.get('proof_kind','full'),cells=hit.get('cells',()),
                                      conflicting_models=hit.get('conflicting_models',False),
                                      contradicts=hit.get('contradicts',False),view_features=ViewFeatures(frame,map_area,clear),
-                                     inliers=hit['inliers'],region_verified=hit.get('region_verified',False))
+                                     inliers=hit['inliers'],region_verified=hit.get('region_verified',False),
+                                     local_verified=hit.get('local_verified',False))
                     if entry and not incumbent:
                         reference['camera_support']=self.corroborates_b2_camera(prior,cameras,reference)
             except Exception as exc:
@@ -377,7 +378,7 @@ class LiveController(base.LiveController):
             self.floor_visits={key:v for key,v in self.floor_visits.items() if permitted_floor(v['floor']['id']) and v.get('unique_layout')}
             self.view_anchors={key:v for key,v in self.view_anchors.items() if permitted_floor(key)}
             self.crossing_views={key:v for key,v in getattr(self,'crossing_views',{}).items() if permitted_floor(key)}
-            if 'view_features' in reference and (needs_pose or wrong_cache or wrong_display or state.challenger):
+            if reference['floor']['layout_id']==identity and 'view_features' in reference and (needs_pose or wrong_cache or wrong_display):
                 anchor=dict(reference)
                 mat=anchor['matrix']
                 anchor['result']=dict(floor=anchor['floor'],matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
@@ -386,15 +387,17 @@ class LiveController(base.LiveController):
                 self.pose_fixes[anchor['floor']['id']]=anchor
             self.due=0.
         if state.challenger or state.b1_conflict:
-            self.proof_due=min(self.proof_due,time.monotonic()+.25)
-            self.display=self.pending=None
-            if self.overlay and self.overlay._visible:self.overlay.hide()
+            self.proof_due=min(self.proof_due,time.monotonic()+(.65 if state.region_layout else .25))
+            if state.blocks_floor('B2'):
+                self.display=self.pending=None
+                if self.overlay and self.overlay._visible:self.overlay.hide()
         if state.layout and state.layout!=previous:
             self.landing_due=0.
             threading.Thread(target=self.matcher.prepare_paired_floor,args=(state.layout,),daemon=True).start()
         event=('round_rechecking' if state.challenger else 'round_corrected' if previous and previous!=state.layout
                else 'round_locked' if state.layout else 'round_confirming')
-        self.note(event,state.status(),layout=identity,confirmations=state.proposal_count if state.challenger else state.count)
+        self.note(event,state.status(),layout=identity,confirmations=state.proposal_count if state.challenger else state.count,
+                  b2_local=state.region_layout,proof_kind=reference.get('proof_kind'),inliers=reference.get('inliers'))
 
     def map_key_changed(self):
         super().map_key_changed()
@@ -446,13 +449,18 @@ class LiveController(base.LiveController):
         recheck_b2=automatic and self.round_lock.b1_conflict
         blocked={level for level in ('B2','B3') if automatic and self.round_lock.blocks_floor(level)}
         lifetime=float('inf') if locked else 300
-        if locked and (not self.valid_visit(last,dict(game=game,roi=roi),lifetime) or last['floor']['layout_id']!=locked):
-            last=self.round_lock.reference
+        if locked:
+            valid=self.valid_visit(last,dict(game=game,roi=roi),lifetime)
+            expected=locked
+            if valid and last.get('selected_floor')=='B2':
+                expected=self.round_lock.region_layout or locked
+            if not valid or last['floor']['layout_id']!=expected:last=self.round_lock.reference
         if (manual or not self.valid_visit(last,dict(game=game,roi=roi),lifetime)
                 or not last.get('selected_floor')):last=None
         floor_limit=self.app.floor_limit.get()
-        verify=(not manual and not self.warming and
-                self.app.layout_limit.get()=='自动' and time.monotonic()>=self.proof_due)
+        from_b1=getattr(self,'observed_floor',None)=='B1'
+        verify=(not manual and not self.warming and automatic and
+                (from_b1 or time.monotonic()>=self.proof_due))
         style='structure' if self.app.overlay_style.get()=='结构' else 'original_clean'
         b1_due=self.b1_due
         self.sampling = True
@@ -468,7 +476,7 @@ class LiveController(base.LiveController):
                 not self.round_lock.b1_conflict and not self.round_lock.challenger and not self.round_lock.uncertain
                 and self.round_lock.preferred('B2') in (None,landing.layout)):
             pair_identity=landing.layout
-        trusted={'B2':locked,'B3':landing.layout or pair_locked}
+        trusted={'B2':local_b2 or locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
 
         def grab():
@@ -739,6 +747,7 @@ class LiveController(base.LiveController):
         level=sample.get('selected_floor')
         if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
             self.transfer_from=getattr(self,'observed_floor',None)
+            if level=='B2' and self.transfer_from=='B1':self.proof_due=0.
             self.observed_floor=level
         if sample.get('round_opening') and self.round_lock.observe_opening(level,sample['at']):
             self.proof_due=self.landing_due=0.

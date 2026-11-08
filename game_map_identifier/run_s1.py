@@ -124,7 +124,7 @@ if __name__ == '__main__':
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
                 'opening_floor':lock.opening_floor,'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
-                'b3_local':lock.landing.layout,'b3_pending':lock.landing.pending,
+                'b2_local':lock.region_layout,'b3_local':lock.landing.layout,'b3_pending':lock.landing.pending,
                 'waiting_b2':lock.b2_arrival,'waiting_b3':lock.landing.waiting,
                 'pose_adjustment':correction and correction['adjustment'],
                 'wall_error_before_px':correction and correction['before_px'],

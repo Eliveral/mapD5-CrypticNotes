@@ -87,10 +87,12 @@ class RoundLock:
     def blocks_floor(self,level):
         disputed=bool(self.uncertain or self.challenger or self.b1_conflict)
         if level=='B3':
-            return self.landing.waiting or bool(self.landing.pending) or ((disputed or self.b2_arrival) and not self.landing.layout)
-        local=(level=='B2' and not self.layout and self.region_layout is not None and
-               self.region_layout==self.preferred('B2'))
-        return (disputed or self.recheck_b2_after_landing or (self.b2_arrival and not local)) and level!='B1'
+            pending_b2=disputed or self.b2_arrival or (self.proposal is not None and not self.layout)
+            return self.landing.waiting or bool(self.landing.pending) or (pending_b2 and not self.landing.layout)
+        if level=='B2' and self.region_layout and self.region_layout==self.preferred('B2') and not self.uncertain:
+            return False
+        if level=='B2' and not self.layout and self.proposal is not None:return True
+        return (disputed or self.recheck_b2_after_landing or self.b2_arrival) and level!='B1'
 
     def observe_landing(self,hit):
         review=self.landing
@@ -107,7 +109,7 @@ class RoundLock:
             # decides, only a common region including the lock can be drawn.
             return not self.layout or self.layout in candidates
         if self.blocks_floor(level):return False
-        expected=self.preferred(level) if level=='B3' else self.layout or (self.region_layout if level=='B2' else None)
+        expected=self.preferred(level) if level=='B3' else self.region_layout or self.layout
         return not expected or (layout==expected and all(v==expected for v in candidates))
 
     def observe(self,reference):
@@ -124,26 +126,46 @@ class RoundLock:
             self.proposal=None;self.proposal_count=0;self.cells.clear()
             return changed
         previously_uncertain=self.uncertain
-        self.uncertain=False
         layout=reference['floor']['layout_id']
         if self.layout==layout:
+            if self.challenger and (self.region_layout or self.uncertain) and reference.get('proof_kind')=='partial' and not reference.get('region_verified'):
+                # A weak glimpse of the old ID cannot erase a stronger local
+                # replacement. Hide both until the new pixels discriminate them.
+                self.region_layout=None;self.region_cameras.clear()
+                self.uncertain=True
+                return not previously_uncertain
+            self.uncertain=False
             disputed=bool(self.challenger)
             rechecked=self.b1_conflict or self.recheck_b2_after_landing or self.b2_arrival
             self.b2_arrival=False
             self.b1_conflict=False
             self.recheck_b2_after_landing=False
             self.reference=reference
+            self.region_layout=None;self.region_cameras.clear()
             self.proposal=None;self.proposal_count=0;self.cells.clear()
             return disputed or previously_uncertain or rechecked
-        if self.layout and not reference.get('contradicts'):return False
+        if self.layout and not reference.get('contradicts'):
+            # An inconclusive alternative cannot clear an outstanding conflict.
+            if self.region_layout and layout!=self.region_layout:
+                self.region_layout=None;self.region_cameras.clear()
+                self.uncertain=True
+                return True
+            return False
+        self.uncertain=False
         if not self.proposal or layout!=self.proposal['floor']['layout_id']:
             self.proposal_count=0;self.cells.clear()
             self.region_layout=None;self.region_cameras.clear()
         old_region=self.region_layout
-        if self.opening_floor=='B2' and self.b2_arrival and not self.layout and reference.get('region_verified'):
-            self.region_layout=layout
         cells=set(reference.get('cells',()))
         novel=cells-self.cells
+        # A local B2 pose can be useful while a prior round ID is still
+        # under review. It neither promotes that proposal nor seeds B3.
+        strong_region=reference.get('region_verified')
+        corroborated_regions=(self.proposal_count and self.proposal.get('region_verified')
+                              and strong_region and len(novel)>=3)
+        cold_full=not self.layout and reference.get('proof_kind')=='full' and not self.b2_arrival
+        if cold_full or reference.get('local_verified') or (strong_region and (not self.layout or corroborated_regions)):
+            self.region_layout=layout
         corroborated=(self.region_layout==layout and not self.layout and reference.get('camera_support'))
         if reference.get('proof_kind')=='partial' and self.proposal_count and len(novel)<3 and not corroborated:
             return old_region!=self.region_layout
@@ -169,6 +191,7 @@ class RoundLock:
 
     def status(self):
         if self.uncertain:return '负二的固定结构比对有冲突 · 等待更多墙线'
+        if self.region_layout:return f'负二已定位 {self.region_layout[3:]} · 整局核对 {self.proposal_count}/{self.required}'
         if self.challenger:return f'负二与旧布局 {self.layout[3:]} 冲突 · 复核布局 {self.challenger[3:]}（{self.proposal_count}/{self.required}）'
         if self.landing.layout and self.recheck_b2_after_landing:
             return f'负三已确认 {self.landing.layout[3:]} · 回负二时重新核对'
@@ -178,7 +201,6 @@ class RoundLock:
         if self.landing.layout and self.landing.layout!=self.layout:
             b2=self.layout[3:] if self.layout else '未确认'
             return f'负二 {b2} · 负三独立确认 {self.landing.layout[3:]}'
-        if self.b2_arrival and self.region_layout:return f'负二局部已定位 {self.region_layout[3:]} · 本局核对 {self.proposal_count}/{self.required}'
         if self.b2_arrival:return f'负二落点重新核对 · {self.proposal_count}/{self.required}'
         if self.layout:return '本局已锁定 · 布局 '+self.layout[3:]+'（负二已确认 3 次）'
         if self.candidate:return f'负二核对 {self.count}/{self.required} · 布局 {self.candidate[3:]}'

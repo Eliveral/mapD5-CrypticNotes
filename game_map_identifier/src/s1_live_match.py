@@ -471,10 +471,15 @@ class LiveMatcher(FloorMatcher):
             result=full
         else:result=wall
         result['region_verified']=bool(wall.get('region_verified'))
-        if full and result['region_verified']:
+        if full:
+            # The descriptor match and HD wall registration must independently
+            # select one layout and agree on where the visible rooms actually are.
             points=np.c_[full['points'],np.ones(len(full['points']))].T
             delta=(wall['matrix']-full['matrix'])@np.linalg.inv(np.vstack((full['matrix'],[0,0,1])))@points
-            result['region_verified']=np.percentile(np.linalg.norm(delta,axis=0),75)<image.shape[0]*.008
+            errors=np.linalg.norm(delta,axis=0)
+            result['region_verified'] &= bool(np.percentile(errors,75)<image.shape[0]*.008)
+            result['local_verified']=bool(full['verified_rooms']>=5 and wall['inliers']>=18
+                                          and len(wall['cells'])>=10 and np.percentile(errors,90)<image.shape[0]*.008)
         result['contradicts']=bool(incumbent and incumbent!=wall['floor']['layout_id'] and
                                    support.get(incumbent,0)<.70*wall['inliers'])
         return result

@@ -31,7 +31,12 @@ class FixedWalls:
             # Two grids avoid splitting a correct vote at a bin boundary.
             for shift in (0.,3.):
                 cells=np.floor((offsets+shift)/6).astype('int32')
-                bins,ids,counts=np.unique(cells,axis=0,return_inverse=True,return_counts=True)
+                # A scalar bin key preserves lexicographic cell order and ties
+                # without sorting structured (x,y) rows for every zoom ratio.
+                y=cells[:,1]
+                stride=int(y.max())-int(y.min())+1
+                keys=cells[:,0].astype(np.int64)*stride+y
+                _,ids,counts=np.unique(keys,return_inverse=True,return_counts=True)
                 for idx in np.argsort(counts)[-3:]:
                     if counts[idx]<4:continue
                     offset=np.median(offsets[ids==idx],axis=0)
