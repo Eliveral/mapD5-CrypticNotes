@@ -20,6 +20,8 @@ from .s1_program_update import APP_TAG,startup_receipt
 
 from .s1_theme import BG, JADE, MUTED, apply_theme
 from . import s1_desktop as desktop
+from .s1_keys import MapBinding
+from .s1_key_dialog import MapKeyDialog
 DEFAULT_OVERLAY_OPACITY=28
 
 class S1Window(tk.Tk):
@@ -54,26 +56,31 @@ class S1Window(tk.Tk):
         self.preferences_path=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'CrypticNotesAssistantS1'/'preferences-v32.json'
         self.persist_preferences=controls
         self.preferences={};self.save_timer=None
-        chosen_key='Caps Lock'
+        self.binding=None if controls else MapBinding(0x14)
+        self.binding_dialog=None
+        self.binding_resume=None
+        self.shortcut_buttons={}
         opacity=DEFAULT_OVERLAY_OPACITY
         if controls:
             try:
                 saved=json.loads(self.preferences_path.read_text(encoding='utf-8'))
                 if isinstance(saved,dict):self.preferences=saved
-                selected=self.preferences.get('map_key')
-                if selected in ('Caps Lock','M','Tab'):chosen_key=selected
+                self.binding=MapBinding.load(self.preferences.get('map_key'))
                 opacity=max(15,min(90,int(self.preferences.get('clean_map_opacity',DEFAULT_OVERLAY_OPACITY))))
             except (OSError,ValueError,TypeError,OverflowError):pass
-        self.map_key=tk.StringVar(value=chosen_key)
+        self.map_key=tk.StringVar(value=self.binding.label if self.binding else '未绑定')
         self.overlay_style=tk.StringVar(value='高清底图');self.overlay_alpha=tk.DoubleVar(value=opacity)
         self.opacity_label=tk.StringVar(value=f'{opacity}%')
         desktop.gallery(self,gallery)
         desktop.settings(self,settings)
         from .s1_trigger_live import LiveController
-        self.live=LiveController(self, autostart=autostart, controls=controls)
+        self.live=LiveController(self, autostart=bool(self.binding and autostart), controls=controls)
         self.update_detection_action()
         self.protocol('WM_DELETE_WINDOW',self.destroy)
         self.populate();self.after(120,self.poll)
+        self.update_shortcut_labels()
+        if controls and self.binding is None:
+            self.after_idle(lambda:self.request_map_binding(resume=True if autostart else None))
 
     def toggle_detection(self):
         if self.live.active and self.live.continuous and not self.live.hidden:
@@ -111,9 +118,37 @@ class S1Window(tk.Tk):
         if hasattr(self,'live') and not self.live.closed:self.live.close()
         super().destroy()
 
-    def change_map_key(self,event=None):
+    def request_map_binding(self,resume=None):
+        if resume is not None:self.binding_resume=resume
+        if self.binding_dialog:
+            self.binding_dialog.lift()
+            return
+        self.binding_dialog=MapKeyDialog(self)
+
+    def finish_map_binding(self,dialog,binding):
+        if dialog is not self.binding_dialog:return
+        resume=self.binding_resume
+        self.binding_dialog=None;self.binding_resume=None
+        dialog.destroy()
+        if binding is not None:
+            saved=self.set_map_binding(binding)
+            if resume is not None:self.live.start(resume)
+            if not saved:
+                messagebox.showwarning('键位未保存','本次绑定已生效。设置文件未能写入，下次启动需要重新绑定。',parent=self)
+        elif self.binding is None:
+            self.live_status.set('检测待机，点击“开启检测”即可继续绑定。')
+
+    def set_map_binding(self,binding):
+        self.binding=binding
+        self.map_key.set(binding.label)
+        self.update_shortcut_labels()
         self.live.map_key_changed()
-        self.save_preferences()
+        return self.save_preferences()
+
+    def update_shortcut_labels(self):
+        for key,(button,title) in self.shortcut_buttons.items():
+            label=title if self.binding==MapBinding(key) else f'{title}  F{key-0x6f}'
+            button.configure(text=label)
 
     def change_opacity(self,value):
         percent=round(float(value))
@@ -130,11 +165,15 @@ class S1Window(tk.Tk):
         if self.persist_preferences:
             try:
                 self.preferences_path.parent.mkdir(parents=True,exist_ok=True)
-                self.preferences.update(map_key=self.map_key.get(),clean_map_opacity=round(self.overlay_alpha.get()))
+                self.preferences['clean_map_opacity']=round(self.overlay_alpha.get())
+                if self.binding:self.preferences['map_key']=self.binding.saved()
+                else:self.preferences.pop('map_key',None)
                 temp=self.preferences_path.with_suffix(f'.{os.getpid()}.tmp')
                 temp.write_text(json.dumps(self.preferences),encoding='utf-8');temp.replace(self.preferences_path)
             except OSError:
                 self.live_status.set('设置已生效，本次未能保存。')
+                return False
+        return True
 
     def populate(self,ids=None):
         selected=self.tree.selection()
@@ -279,7 +318,7 @@ class S1Window(tk.Tk):
 
     def restore_s1_hotkeys(self):
         from .s1_live import Hotkeys
-        self.live.hotkeys=Hotkeys(self.live.events,self.map_key.get());self.live.suspended=False
+        self.live.hotkeys=Hotkeys(self.live.events,self.binding);self.live.suspended=False
         self.live.start()
 
     def watch_legacy(self):

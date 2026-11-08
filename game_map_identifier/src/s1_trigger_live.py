@@ -48,7 +48,8 @@ class LiveController(base.LiveController):
         self.last_note_at = 0.
         self.diagnostic_busy = False
         super().__init__(*args, **kwargs)
-        self.note('trigger_waiting', '自动锁定第五人格；地图键默认 Caps Lock，按下立即连续抓图。')
+        self.note('trigger_waiting', f'地图键：{self.app.map_key.get()}。打开地图即可开始匹配。'
+                  if self.app.binding else '请先绑定游戏地图键。')
 
     def note(self, state, message=None, **details):
         now = time.monotonic()
@@ -65,6 +66,9 @@ class LiveController(base.LiveController):
         # Only identity is cached; every new opening needs fresh registration.
 
     def start(self, continuous=True):
+        if self.app.binding is None:
+            self.app.request_map_binding(resume=continuous)
+            return
         self.session_revision += 1
         self.clear_visits()
         super().start(continuous)
@@ -1262,7 +1266,7 @@ class LiveController(base.LiveController):
                 elif kind == 'templates_ready':
                     self.warming = False
                     self.due = 0
-                    self.note('templates_ready', '图谱已准备好；按地图键立即触发检测。')
+                    self.note('templates_ready', '图谱已就绪，按地图键即可触发检测。' if self.app.binding else '图谱已就绪，请先绑定游戏地图键。')
                     self.start_match()
                 elif kind == 'templates_failed':
                     self.warming = False

@@ -16,7 +16,8 @@ from PIL import Image, ImageTk
 from .s1_alignment import FloorMatcher
 from .s1_visibility import MapVisibility
 from .config import ProjectConfig, project_root
-from .s1_game import discover_game, refresh_game, KeyEdges, MAP_KEYS
+from .s1_game import discover_game, refresh_game
+from .s1_hotkeys import Hotkeys
 
 
 def primary_bounds():
@@ -66,70 +67,6 @@ def capture(roi):
     else:
         with mss.mss() as sct:raw=sct.grab(box)
     return cv2.cvtColor(np.asarray(raw),cv2.COLOR_BGRA2BGR)
-
-
-class Hotkeys:
-    def __init__(self, events, map_key='Caps Lock'):
-        self.events = events
-        self.edges = KeyEdges(MAP_KEYS.get(map_key, 0x14))
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
-
-    def run(self):
-        u = ctypes.windll.user32
-        # The configured map key must reach the game. RegisterHotKey would consume it, so observe
-        # key edges in a passive hook and ALWAYS continue the hook chain.
-        class KeyData(ctypes.Structure):
-            _fields_ = [('vkCode', wintypes.DWORD), ('scanCode', wintypes.DWORD),
-                        ('flags', wintypes.DWORD), ('time', wintypes.DWORD), ('extra', ctypes.c_size_t)]
-        hook_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-        u.SetWindowsHookExW.argtypes = [ctypes.c_int, hook_type, wintypes.HINSTANCE, wintypes.DWORD]
-        u.SetWindowsHookExW.restype = wintypes.HANDLE
-        u.CallNextHookEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
-        u.CallNextHookEx.restype = ctypes.c_ssize_t
-        u.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
-
-        @hook_type
-        def observe(code, message, address):
-            try:
-                if code >= 0 and message in (0x100, 0x104, 0x101, 0x105):
-                    data = ctypes.cast(address, ctypes.POINTER(KeyData)).contents
-                    modified = any(u.GetAsyncKeyState(v) & 0x8000 for v in (0x10, 0x11, 0x12, 0x5B, 0x5C))
-                    action = self.edges.update(data.vkCode, message in (0x100, 0x104), modified)
-                    if action:
-                        self.events.put(('map_key', (action, foreground())))
-            except Exception:
-                pass  # An observer must never interrupt input delivery.
-            return u.CallNextHookEx(None, code, message, address)
-
-        hook = u.SetWindowsHookExW(13, observe, None, 0)
-        self.events.put(('hook_ready', bool(hook)))
-        actions = {701: (0x77, 'once'), 702: (0x76, 'auto'), 703: (0x78, 'hide'), 704: (0x79, 'stop')}
-        registered = []
-        try:
-            for ident, (key, action) in actions.items():
-                if u.RegisterHotKey(None, ident, 0x4000, key):
-                    registered.append(ident)
-                else:
-                    self.events.put(('hotkey_error', f'F{key-0x6f} 已被占用，请使用窗口按钮。'))
-            msg = wintypes.MSG()
-            while not self.stop_event.wait(.01):
-                while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
-                    if msg.message == 0x0312 and msg.wParam in actions:
-                        self.events.put(('key', actions[msg.wParam][1]))
-        finally:
-            if hook:
-                u.UnhookWindowsHookEx(hook)
-            for ident in registered:
-                u.UnregisterHotKey(None, ident)
-
-    def close(self):
-        self.stop_event.set()
-        self.thread.join(timeout=.3)
-
-    def set_map_key(self, name):
-        self.edges.map_vk = MAP_KEYS.get(name, 0x14)
 
 
 class RegionPicker(tk.Toplevel):
@@ -186,7 +123,7 @@ class LiveController:
         self.visibility = MapVisibility(app.catalog.root/'ui')
         self.warming = bool(controls)
         self.events = queue.Queue()
-        self.hotkeys = Hotkeys(self.events, app.map_key.get()) if controls else None
+        self.hotkeys = Hotkeys(self.events, app.binding) if controls else None
         self.overlay = None
         self.capture_excluded = False
         self.active = bool(autostart)
@@ -228,7 +165,7 @@ class LiveController:
             elif getattr(self, 'warming', False):
                 badge = '检测已开启 · 正在准备地图图谱'
             elif self.hidden:
-                badge = '检测已开启 · 覆盖已隐藏（F9 恢复）'
+                badge = '检测已开启 · 覆盖已隐藏（可在检测设置中恢复）'
             elif state == 'overlay_shown':
                 badge = '检测已开启 · 地图已匹配'
             elif state == 'capture_error':
@@ -301,14 +238,14 @@ class LiveController:
         self.active, self.continuous, self.hidden = True, continuous, False
         self.due = time.monotonic()+.25
         self.discovery_due = 0
-        self.note('armed', '自动检测已开启；切回游戏并打开地图。F10 停止。')
+        self.note('armed', '自动检测已开启，切回游戏并打开地图。')
         if self.app.state() not in ('iconic', 'withdrawn'):
             self.app.iconify()
 
     def stop(self, quiet=False):
         self.active = False
         self.invalidate()
-        self.note('stopped', None if quiet else '已停止并清除覆盖。F7 恢复自动识别。')
+        self.note('stopped', None if quiet else '已停止并清除覆盖，点击“开启检测”即可恢复。')
 
     def settings_changed(self):
         self.invalidate()
@@ -318,8 +255,8 @@ class LiveController:
     def map_key_changed(self):
         name = self.app.map_key.get()
         if self.hotkeys:
-            self.hotkeys.set_map_key(name)
-        self.settings_changed()
+            self.hotkeys.set_map_key(self.app.binding)
+        self.due=0.
         self.note('map_key_changed', f'地图键：{name}。持续截图检测始终开启，按键仅加速重查。')
 
     def save_map_sample(self, frame, presence):
@@ -339,12 +276,12 @@ class LiveController:
 
     def toggle_hidden(self):
         if not self.active:
-            self.app.live_status.set('已停止；按 F7 恢复自动识别。')
+            self.app.live_status.set('已停止，点击“开启检测”即可恢复。')
             return
         self.hidden = not self.hidden
         self.invalidate()
         self.due = time.monotonic()+.1
-        self.note('hidden' if self.hidden else 'armed', '覆盖已隐藏（F9 恢复）' if self.hidden else '重新核对地图后显示…')
+        self.note('hidden' if self.hidden else 'armed', '覆盖已隐藏（可在检测设置中恢复）' if self.hidden else '重新核对地图后显示…')
 
     def set_alpha(self, value):
         if self.overlay:

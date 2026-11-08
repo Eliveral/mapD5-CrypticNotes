@@ -120,8 +120,11 @@ def settings(app,page):
         label(frame,name,size=13,bold=True).pack(anchor='w',padx=14,pady=(10,5))
         return frame
     view=card(0,'识别与显示')
+    binding_row=tk.Frame(view,bg=SURFACE);binding_row.pack(fill='x',padx=14,pady=2)
+    label(binding_row,'游戏地图键',color=MUTED).pack(side='left')
+    app.bind_key_button=ttk.Button(binding_row,textvariable=app.map_key,command=app.request_map_binding)
+    app.bind_key_button.pack(side='right')
     for name,var,values,callback in [
-        ('游戏地图键',app.map_key,('Caps Lock','M','Tab'),app.change_map_key),
         ('限定布局',app.layout_limit,['自动']+app.layouts,lambda e:app.live.settings_changed()),
         ('限定楼层',app.floor_limit,('自动','B1','B2','B3'),lambda e:app.live.settings_changed()),
         ('覆盖样式',app.overlay_style,('高清底图','结构'),lambda e:app.live.settings_changed())]:
@@ -138,9 +141,11 @@ def settings(app,page):
     keys=tk.Frame(actions,bg=SURFACE);keys.pack(fill='x',padx=12,pady=(3,4))
     keys.columnconfigure((0,1),weight=1,uniform='keys')
     for i,(name,call) in enumerate([
-        ('重新识别  F8',lambda:app.live.start(False)),('恢复自动  F7',lambda:app.live.start(True)),
-        ('隐藏 / 恢复  F9',lambda:app.live.toggle_hidden()),('停止检测  F10',lambda:app.live.stop()),
+        ('重新识别',lambda:app.live.start(False)),('恢复自动',lambda:app.live.start(True)),
+        ('隐藏 / 恢复',lambda:app.live.toggle_hidden()),('停止检测',lambda:app.live.stop()),
         ('框选地图区域',lambda:app.live.pick_region()),('恢复游戏全窗',lambda:app.live.reset_region())]):
-        ttk.Button(keys,text=name,command=call).grid(row=i//2,column=i%2,sticky='ew',padx=2,pady=3)
+        button=ttk.Button(keys,text=name,command=call)
+        button.grid(row=i//2,column=i%2,sticky='ew',padx=2,pady=3)
+        if i<4:app.shortcut_buttons[(0x77,0x76,0x78,0x79)[i]]=(button,name)
     ttk.Button(actions,text='厄运之女 · 原版识别',style='Quiet.TButton',command=app.open_legacy).pack(
         anchor='w',padx=14,pady=(4,10))

@@ -5,7 +5,7 @@ from ctypes import wintypes as W
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 
-MAP_KEYS = {'Caps Lock': 0x14, 'M': 0x4D, 'Tab': 0x09}
+from .s1_keys import MapBinding
 
 
 @dataclass(frozen=True)
@@ -85,15 +85,17 @@ class KeyEdges:
     """Pure debouncer shared by the passive hook and regression tests."""
     def __init__(self, map_vk=0x14):
         self.held = set()
-        self.map_vk = map_vk
+        self.binding = MapBinding(map_vk) if map_vk is not None else None
 
-    def update(self, vk, down, modified=False):
+    def update(self, vk, down, modified=False, *, mods=0):
         if not down:
             self.held.discard(vk)
             return None
         if vk in self.held:
             return None
         self.held.add(vk)
-        if not modified:
-            return {self.map_vk: 'map', 0x1B: 'escape'}.get(vk)
+        if modified:return None
+        if self.binding is not None and self.binding.key==vk and self.binding.mods==mods:
+            return 'map'
+        if vk==0x1B and not mods:return 'escape'
         return None

@@ -191,8 +191,13 @@ if __name__ == '__main__':
         assert app.live.active and app.live.continuous
         app.detection_action.invoke()
         button_check={'start':True,'stop':True,'restart':True,'status':True}
-        app.map_key.set('M');app.change_map_key()
-        app.map_key.set('Caps Lock');app.change_map_key()
+        from src.s1_keys import MapBinding,CTRL
+        app.bind_key_button.invoke();app.update()
+        dialog=app.binding_dialog
+        dialog.capture.observe(ord('K'),True,CTRL,dialog.capture.hwnd)
+        dialog.after_cancel(dialog.timer);dialog.poll();dialog.save_button.invoke()
+        assert app.binding==MapBinding(ord('K'),CTRL) and app.map_key.get()=='Ctrl + K'
+        app.set_map_binding(MapBinding(0x14))
         button_check['configurable_map_key']=True
         app.destroy()
         (project_root()/'s1-ui-check.json').write_text(json.dumps({'checked':checked,'alchemy_views':alchemy_views,'race_views':race_views,'one_click':button_check,'scope':'Tk render state and real button callbacks; not live-game visual inspection'},indent=2),encoding='utf-8')
