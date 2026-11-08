@@ -3,7 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import threading
-from .s1_view_motion import ViewFeatures,exclude_map_hud,zoom_changed
+from .s1_view_motion import ViewFeatures,exclude_map_hud,zoom_position,zoom_changed,zoom_allows_scale
 from .s1_alignment import FloorMatcher, geometry, register
 from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
@@ -203,6 +203,24 @@ class LiveMatcher(FloorMatcher):
                     return transfer
         return None
 
+    def locate_at_new_zoom(self,image,layout,level,reference):
+        """Reacquire the known floor after a slider move, independently of the old position."""
+        fid,before,old_scale=reference
+        floor=self.handoffs.floors.get(fid)
+        if not floor or floor['layout_id']!=layout or floor['floor']!=level:return None
+        features=ViewFeatures(image,map_area)
+        if not zoom_changed(before,features.zoom):return None
+        shrinking=features.zoom>before
+        bounds=(.16,1.) if shrinking else (1.,6.)
+        ratios=np.geomspace(*bounds,26)
+        nominal=old_scale*np.sqrt(bounds[0]*bounds[1])
+        hit=self.pose_check.hd_walls.locate(features,floor,nominal,confirmed=True,
+                                            ratios=ratios*old_scale/nominal)
+        if hit and zoom_allows_scale(before,features.zoom,hit['scale']/old_scale):
+            hit.update(search='zoom_wall_reset',view_features=features)
+            return hit
+        return None
+
     def handoff(self,image,visit,target):
         if not visit or not target or visit['floor']['floor']==target:return None
         poses=visit.get('alternatives') or [visit]
@@ -292,6 +310,26 @@ class LiveMatcher(FloorMatcher):
         return rendered
 
     def locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
+        if (visit and layout and visit.get('zoom') is not None and visit.get('unique_layout')
+                and not visit.get('provisional') and floor_name in ('B2','B3')
+                and visit['floor']['id']==layout+'_'+floor_name
+                and zoom_changed(visit['zoom'],zoom_position(image))):
+            reference=(visit['floor']['id'],visit['zoom'],float(np.linalg.norm(visit['matrix'][0,:2])))
+            return self.locate_resized(image,layout,floor_name,reference)
+        return self._locate_selected(image,layout,floor_name,scale_hint,visit)
+
+    def locate_resized(self,image,layout,level,reference):
+        result=self.locate_at_new_zoom(image,layout,level,reference)
+        if result:return result
+        self.check_search()
+        # Match current walls without the obsolete prior position or scale.
+        result=self._locate_selected(image,layout,level)
+        if result['accepted'] and not zoom_allows_scale(reference[1],zoom_position(image),
+                                                         result['scale']/reference[2]):
+            return dict(accepted=False,reason='缩放已变化，等待当前尺寸的固定墙线。')
+        return result
+
+    def _locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
         if floor_name not in ('B1', 'B2', 'B3'):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
         if floor_name=='B1' and not layout:

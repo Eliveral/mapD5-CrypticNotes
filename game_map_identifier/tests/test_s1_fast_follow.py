@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from src.s1_view_motion import ViewFeatures
+from src.s1_view_motion import ViewFeatures,zoom_allows_scale
 from src.s1_original_map import OriginalMap
 
 
@@ -39,6 +39,27 @@ def test_wall_motion_recovers_known_camera(scale,shift):
     assert hit is not None
     points=np.float64([[120,64,1],[410,195,1]]).T
     assert np.linalg.norm((hit[0]-mat)@points,axis=0).max()<2.
+
+
+@pytest.mark.parametrize('before,after,ratio,allowed',[
+    (.58631,.75528,4.2106236/4.2106256,False),
+    (.58631,.75528,1.84194/4.21062,True),
+    (.75528,.58631,1.00004,False),
+    (.75528,.58631,4.21062/1.84194,True),
+    (.586,.587,1.,True),
+    (None,.755,1.,True),
+])
+def test_slider_direction_and_magnitude(before,after,ratio,allowed):
+    assert bool(zoom_allows_scale(before,after,ratio)) is allowed
+
+
+def test_transition_frame_cannot_stamp_old_scale_on_new_thumb():
+    a=features(rooms(14))
+    # The HUD has already moved while the rooms are still at the old scale.
+    b=features(cv2.warpAffine(rooms(14),np.float64([[1,0,1],[0,1,2]]),(520,300)))
+    a.zoom=.58631;b.zoom=.75528
+    assert a.camera_motion(b) is None
+    assert a.motion_to(b) is None
 
 
 def test_blank_or_different_rooms_cannot_carry_the_old_camera():

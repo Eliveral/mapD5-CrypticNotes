@@ -10,7 +10,7 @@ from . import s1_live as base
 from .s1_live_match import LiveMatcher, signature, same_view, map_area
 from .s1_floor_transition import selected_floor
 from .s1_layer_probe import LayerProbe
-from .s1_view_motion import ViewFeatures,zoom_position,zoom_changed
+from .s1_view_motion import ViewFeatures,zoom_position,zoom_changed,zoom_allows_scale
 from .s1_round_lock import RoundLock,LandingReview
 
 
@@ -122,6 +122,13 @@ class LiveController(base.LiveController):
         selected=self.app.layout_limit.get()
         return self.round_lock.preferred(level) if selected=='自动' else 's1_'+selected
 
+    @staticmethod
+    def scale_agrees(result,reference,zoom):
+        if not reference or not result or not result.get('accepted'):return True
+        fid,before,scale=reference
+        if result['floor']['id']!=fid:return True
+        return zoom_allows_scale(before,zoom,float(np.linalg.norm(result['matrix'][0,:2]))/scale)
+
     def check_pose(self,sample,visit,style):
         if (not isinstance(getattr(self,'matcher',None),LiveMatcher) or not visit or
                 not visit.get('unique_layout') or visit.get('provisional') or sample.get('manual') or
@@ -158,7 +165,9 @@ class LiveController(base.LiveController):
                 anchor['game']!=self.game or self.layout_limit(anchor['floor']['floor']) not in (None,anchor['floor']['layout_id'])):return
         last=self.view_cache
         if not last or last['floor']['id']!=anchor['floor']['id']:return
-        if anchor['at']<last.get('sample_at',0.) and not same_view(last['signature'],anchor['signature']):
+        if anchor['at']<last.get('sample_at',0.) and (
+                zoom_changed(anchor['view_features'].zoom,last.get('zoom')) or
+                not same_view(last['signature'],anchor['signature'])):
             return
         fid=anchor['floor']['id']
         self.pose_fixes[fid]=anchor
@@ -491,6 +500,20 @@ class LiveController(base.LiveController):
                             and v['floor']['layout_id']==pair_locked and v.get('unique_layout')
                             and not v.get('provisional') and self.valid_visit(v,dict(game=game,roi=roi),lifetime)]
                     if paired:last=max(paired,key=lambda v:v.get('sample_at',v['at']))
+                # Use this floor's last measured view even after an intervening
+                # unreadable thumb or a trip to another floor. Never carry a pose across IDs.
+                reference=None
+                if last and floor in ('B2','B3'):
+                    fid=last['floor']['layout_id']+'_'+floor
+                    views=anchors.get(fid,())
+                    for anchor in views:
+                        old_zoom=anchor['view_features'].zoom
+                        if old_zoom is not None and self.valid_visit(anchor,dict(game=game,roi=roi),lifetime):
+                            reference=(fid,old_zoom,float(np.linalg.norm(anchor['matrix'][0,:2])))
+                            break
+                    if (not reference and last['floor']['id']==fid and last.get('unique_layout')
+                            and not last.get('provisional') and last.get('zoom') is not None):
+                        reference=(fid,last['zoom'],float(np.linalg.norm(last['matrix'][0,:2])))
                 scores=presence.get('scores',{})
                 # A single weak HUD button is common during map animations.
                 # Only bridge a recently confirmed, still-selected map. A close
@@ -515,7 +538,7 @@ class LiveController(base.LiveController):
                     clear=probe.unpainted
                 sig=signature(frame) if presence['visible'] else None
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
-                    zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
+                    scale_reference=reference,zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
                     at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
                 if awaiting_opening and presence['visible'] and floor in ('B1','B2','B3','B4'):
                     sample['round_opening']=True
@@ -577,7 +600,7 @@ class LiveController(base.LiveController):
                     else:sample['unusable_pose_fix']=fix
                 track=(presence['visible'] and last and floor and not self.warming and
                        floor_limit in ('自动',floor) and wanted in (None,last['floor']['layout_id']) and
-                       (floor!=last['selected_floor'] or (not stationary if probe else not same_view(sig,last['signature']))))
+                       (floor!=last['selected_floor'] or (not stationary if probe else zoom_changed(last.get('zoom'),zoom) or not same_view(sig,last['signature']))))
                 same_locked_floor=(track and last['selected_floor']==floor and last.get('unique_layout')
                                    and not last.get('provisional') and trusted.get(floor)==last['floor']['layout_id'])
                 if same_locked_floor and not result:
@@ -589,11 +612,11 @@ class LiveController(base.LiveController):
                         if zoom_changed(views[0]['view_features'].zoom,features.zoom):
                             # On returning to a known zoom, prefer its independent
                             # camera to accumulating scale error over many gestures.
-                            reference=next((v for v in views[1:] if v.get('independent')
+                            at_zoom=next((v for v in views[1:] if v.get('independent')
                                             and self.valid_visit(v,sample,lifetime)
                                             and v['view_features'].zoom is not None and features.zoom is not None
                                             and not zoom_changed(v['view_features'].zoom,features.zoom)),None)
-                            if reference is not None:recent.insert(0,reference)
+                            if at_zoom is not None:recent.insert(0,at_zoom)
                         result=self.matcher.follow_anchors(features,last['floor'],recent,quick=True)
                 if (not same_locked_floor and not independent_b1 and not result and presence['visible'] and origin and floor and self.valid_visit(origin,sample,lifetime) and
                         floor!=origin['selected_floor'] and floor_limit in ('自动',floor)
@@ -617,12 +640,14 @@ class LiveController(base.LiveController):
                         result=self.matcher.follow_anchors(features,last['floor'],recent)
                     elif not result:
                         result=self.matcher.follow_known(features,last,floor,allowed,frame,source,locked)
+                if not self.scale_agrees(result,reference,zoom):result=None
                 if (result and not self.display and not probe and pair_locked and floor in ('B2','B3')
                         and result.get('search') in ('view_motion','view_zoom')):
                     corrected=self.matcher.pose_check.check(frame,map_area,clear,result['floor'],result['matrix'],style,True)
                     if corrected:
                         sample['first_pose_fix']=True
                         result=corrected
+                if not self.scale_agrees(result,reference,zoom):result=None
                 tracking=bool(result and result.get('search') in ('camera_pan','camera_zoom'))
                 # A settled view or lost track gets the normal identity review.
                 # Continuous motion still gets a bounded background audit.
@@ -682,7 +707,7 @@ class LiveController(base.LiveController):
                                     result['scale']=float(np.linalg.norm(result['matrix'][0,:2]))
                                     result['view_features']=now_features
                                     pixels=None
-                    if result:
+                    if result and self.scale_agrees(result,reference,sample.get('zoom')):
                         if pixels is None:pixels=draw()
                         sample['handoff']=(result,pixels,style,time.monotonic()-positive_at)
                 self.events.put(('sample',sample))
@@ -943,7 +968,15 @@ class LiveController(base.LiveController):
                     if floor and floor != observed:
                         result = dict(accepted=False, reason=f'当前显示 {observed}，与限定楼层 {floor} 不同。')
                     else:
-                        result = self.matcher.locate_selected(sample['frame'], layout, observed, scale_hint, visited)
+                        ref=sample.get('scale_reference')
+                        resizing=bool(ref and layout and ref[0]==layout+'_'+observed
+                                      and zoom_changed(ref[1],sample.get('zoom')))
+                        if resizing:
+                            result=self.matcher.locate_resized(sample['frame'],layout,observed,ref)
+                        else:
+                            result=self.matcher.locate_selected(sample['frame'],layout,observed,scale_hint,visited)
+                        if not self.scale_agrees(result,ref,sample.get('zoom')):
+                            result=dict(accepted=False,reason='缩放已变化，等待当前尺寸的固定墙线。')
                 else:
                     locate = self.matcher.locate if sample['manual'] else self.matcher.locate_live
                     result = (locate(sample['frame'], cached['layout_id'], cached['floor'])
@@ -999,6 +1032,9 @@ class LiveController(base.LiveController):
         if (not self.active or self.suspended or self.hidden or not self.game or
                 sample.get('revision', self.session_revision) != self.session_revision or
                 (game.hwnd, game.pid) != (self.game.hwnd, self.game.pid)):
+            return
+        if not self.scale_agrees(result,sample.get('scale_reference'),sample.get('zoom')):
+            self.due=0
             return
         if result['accepted']:self.check_b1_conflict(sample,result)
         if result['accepted'] and not self.allowed_result(result):

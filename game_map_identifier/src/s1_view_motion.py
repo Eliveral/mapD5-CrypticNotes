@@ -29,6 +29,19 @@ def zoom_changed(before,after):
     return before is not None and after is not None and abs(before-after)>.0035
 
 
+def zoom_allows_scale(before, after, ratio):
+    """An appreciable thumb movement cannot be explained by a nearly rigid pan."""
+    if not zoom_changed(before,after):
+        return True
+    if not np.isfinite(ratio) or ratio<=0:
+        return False
+    delta=after-before
+    # This is deliberately only a lower bound on the scale change. The final
+    # pose must be measured from walls, not extrapolated from the slider.
+    directed=-np.sign(delta)*np.log(ratio)
+    return directed>=abs(delta)
+
+
 def exclude_map_hud(mask):
     # Team names, portraits and counters stay at fixed screen coordinates
     # while the underlying floor moves. The bottom-right book does the same.
@@ -95,7 +108,7 @@ class ViewFeatures:
                 sx,sy=tw/w,th/h
                 guess=(sx+sy)*.5
                 if not .20<guess<4.8 or abs(sx-sy)>.30*guess:continue
-                if zoom_changed(self.zoom,other.zoom) and (other.zoom-self.zoom)*(guess-1)>.007:continue
+                if not zoom_allows_scale(self.zoom,other.zoom,guess):continue
                 if .96<guess<1.04:continue
                 # Search near the paired component, including rasterisation error.
                 center=np.array([tx+tw*.5,ty+th*.5])
@@ -165,7 +178,7 @@ class ViewFeatures:
                     mat[:,2]+=shift
         mat[:,:2]*=self.factor/other.factor
         mat[:,2]/=other.factor
-        return mat,1,agreement
+        return (mat,1,agreement) if zoom_allows_scale(self.zoom,other.zoom,mat[0,0]) else None
 
     def scale_match(self,other):
         # When zooming in, match the sharper, larger patch down to its smaller
@@ -305,6 +318,7 @@ class ViewFeatures:
             if abs(scale-1)>.025:return None
             scale=1.
         offset=cy-scale*cx
+        if not zoom_allows_scale(self.zoom,other.zoom,scale*self.factor/other.factor):return None
         if not .20<scale<5. or np.median(np.linalg.norm(x*scale+offset-y,axis=1))>1.5:return None
         mat=np.array([[scale,0,offset[0]],[0,scale,offset[1]]],dtype=np.float64)
         h,w=other.geom.shape

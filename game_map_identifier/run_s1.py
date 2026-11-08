@@ -11,7 +11,7 @@ if __name__ == '__main__':
         from src.config import project_root
         from src.s1_catalog import S1Catalog, read_image
         from src.s1_live_match import LiveMatcher,map_area
-        from src.s1_view_motion import ViewFeatures,zoom_position
+        from src.s1_view_motion import ViewFeatures,zoom_position,zoom_changed
         from src.s1_floor_transition import selected_floor
         from src.s1_visibility import MapVisibility
         from src.s1_round_lock import RoundLock
@@ -90,6 +90,10 @@ if __name__ == '__main__':
             if selected=='B2' and prior and prior['floor']['floor']!='B2' and not landing_pose:
                 prior=None
             r=landing_pose
+            if (prior and target_layout and selected==prior_level and prior['floor']['layout_id']==target_layout
+                    and zoom_changed(zoom_position(prior_image),zoom_position(frame))):
+                prior['zoom']=zoom_position(prior_image)
+                r=matcher.locate_selected(frame,target_layout,selected,visit=prior)
             if r is None and prior:r=matcher.handoff(frame,prior,selected)
             if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
