@@ -3,6 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import threading
+from .s1_view_motion import ViewFeatures,exclude_map_hud,zoom_changed
 from .s1_alignment import FloorMatcher, geometry, register
 from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
@@ -49,39 +50,104 @@ class LiveMatcher(FloorMatcher):
         self.original = OriginalMap(self)
 
     def prepare_paired_floor(self, layout):
-        floor = self.handoffs.floors.get(layout+'_B3')
-        if floor and (layout,'B2','B3') in self.coordinates.passages:
-            self.original.source(floor)
-            self.corridors.reference_channels(floor)
+        for level,other in (('B2','B3'),('B3','B2')):
+            floor=self.handoffs.floors.get(layout+'_'+level)
+            sites=self.coordinates.passages.get((layout,level,other))
+            if floor and sites:
+                self.original.source(floor)
+                self.corridors.reference_channels(floor)
+                for _,point,_ in sites:self.handoffs.site(floor,point)
 
-    def paired_b3(self, image, visit, locked, clear=None):
-        """Register a confirmed B2's B3 on the capture worker, including after a camera reset."""
-        if (not visit or not locked or not visit.get('unique_layout') or visit.get('provisional')
-                or visit['floor']['id'] != locked+'_B2'
-                or (locked,'B2','B3') not in self.coordinates.passages):
+    def paired_b3(self,image,visit,locked,clear=None):
+        return self.paired_floor(image,visit,'B3',locked,clear)
+
+    def paired_floor(self,image,visit,target,layout,clear=None,return_views=(),zoom=None,source_history=None):
+        if not visit or not layout or not visit.get('unique_layout') or visit.get('provisional'):
             return None
-        predicted,_ = self.coordinates.predict(visit,'B3')
-        if predicted is None:
+        source=visit['floor'];level=source['floor']
+        if ({level,target}!={'B2','B3'} or source['layout_id']!=layout
+                or (layout,level,target) not in self.coordinates.passages):
             return None
-        floor = self.handoffs.floors[locked+'_B3']
-        factor = min(1.,1000/image.shape[1])
-        small = cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
-        valid = map_area(small)
+        predicted,_=self.coordinates.predict(visit,target)
+        if predicted is None:return None
+        floor=self.handoffs.floors[layout+'_'+target]
+        factor=min(1.,1000/image.shape[1])
+        small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
+        valid=exclude_map_hud(map_area(small))
         if clear is not None:
-            mask = cv2.resize(clear,small.shape[1::-1],interpolation=cv2.INTER_AREA)
-            valid &= np.uint8(mask >= 252)*255
-        geom = geometry(small) & valid
-        fixed = self.handoffs.paired_edges(small,geom,valid,floor,predicted,factor,visit)
-        if fixed is not None:
-            return fixed
-        scale = float(np.linalg.norm(predicted[0,:2]))
-        hit = self.corridors.locate(geom,locked,'B3',scale*factor,quick=True,predicted=predicted*factor,
-                                    zoom_ratios=(1.,.90,1.10,.80,1.20),paired=True)
+            mask=cv2.resize(clear,small.shape[1::-1],interpolation=cv2.INTER_AREA)
+            valid &= np.uint8(mask>=252)*255
+        geom=geometry(small)&valid
+        if np.count_nonzero(geom)<100:return None
+        returned=[v for v in return_views if v and v['floor']['id']==floor['id']
+                  and not zoom_changed(v.get('zoom'),zoom)]
+        player=visit.get('player_hd')
+        if player is None and source_history is not None:
+            player=source_history.get('player_hd')
+        passage=self.handoffs.passage_at(source,target,player)
+        candidates=[]
+        source_zoom=visit.get('zoom')
+        if source_zoom is None and visit.get('view_features'):source_zoom=visit['view_features'].zoom
+        same_scale=not zoom_changed(source_zoom,zoom)
+        if returned and (not same_scale or source_zoom is None):
+            basis=returned[0]['matrix']
+        else:basis=predicted if same_scale else None
+        marker=self.handoffs.player_screen(image) if player is not None else None
+        if passage is not None and basis is not None:
+            if marker is not None:
+                name,start,end=passage
+                target_hd=player+end-start
+                template_point=np.asarray(self.coordinates.matrices[floor['id']])@[*target_hd,1]
+                mat=basis.copy()
+                mat[:,2]=marker-mat[:,:2]@template_point
+                candidates.append(('paired_player',name,mat,passage))
+        for old in returned:
+            known=self.handoffs.passage_at(floor,level,old.get('player_hd'))
+            reverse=(known[0],known[2],known[1]) if known else None
+            candidates.append(('paired_return','上次目标层位置',old['matrix'],passage or (reverse if player is None else None)))
+        if same_scale:candidates.append(('paired_camera','上下层对应位置',predicted,passage))
+        checked=[]
+        for method,name,mat,site in candidates:
+            if any(np.allclose(mat,old,rtol=0,atol=.02) and (site is not None)==has_site for old,has_site in checked):continue
+            checked.append((mat,site is not None))
+            hit=self.handoffs.paired_edges(small,geom,valid,floor,mat,factor,visit,site)
+            if hit:
+                hit.update(search=method,passage=name)
+                return hit
+        for method,name,mat,site in candidates:
+            if site is None or method not in ('paired_player','paired_return'):continue
+            aligned=self.handoffs.refine_passage(small,geom,valid,floor,mat,factor,site)
+            if aligned is not None:
+                hit=self.handoffs.paired_edges(small,geom,valid,floor,aligned,factor,visit,site)
+                if hit:
+                    hit.update(search=method+'_adjust',passage=name)
+                    return hit
+        if basis is not None and visit.get('player_hd') is not None:
+            offset=passage[2]-passage[1] if passage else self.coordinates.offsets.get((layout,level,target))
+            if offset is not None:
+                hit=self.handoffs.whole_room_camera(small,geom,valid,floor,basis,factor,visit,
+                                                     visit['player_hd']+offset,marker,passage is not None)
+                if hit:return hit
+        # Even away from the shared passage, a previously seen target room can
+        # supply a camera. Verify both the measured screen motion and atlas walls.
+        features=None
+        for old in return_views:
+            if not old or old['floor']['id']!=floor['id'] or not old.get('view_features'):continue
+            if features is None:features=ViewFeatures(image,map_area,clear)
+            relative=old['view_features'].camera_motion(features)
+            if relative is None:continue
+            mat=relative[0]@np.vstack((old['matrix'],[0,0,1]))
+            hit=self.handoffs.paired_edges(small,geom,valid,floor,mat,factor,visit,matched_return=True)
+            if hit:
+                hit.update(search='paired_return_view',passage='上次目标层墙角',view_features=features)
+                return hit
+        if basis is None:return None
+        # Keep the old wider search available for a camera reset or a missing marker.
+        hit=self.corridors.locate(geom,layout,target,float(np.linalg.norm(basis[0,:2]))*factor,
+                                  quick=True,predicted=basis*factor,zoom_ratios=(1.,.90,1.10,.80,1.20),paired=True)
         if hit is not None:
-            hit['matrix'] /= factor
-            hit['scale'] /= factor
-            hit['search'] = 'paired_corridor'
-            hit['passage'] = '锁定布局·负三墙线'
+            hit['matrix']/=factor;hit['scale']/=factor
+            hit.update(search='paired_corridor',passage='锁定布局·当前层墙线')
         return hit
 
     @staticmethod

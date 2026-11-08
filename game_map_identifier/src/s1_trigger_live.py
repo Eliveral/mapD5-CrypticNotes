@@ -29,6 +29,8 @@ class LiveController(base.LiveController):
         self.scale_hint = None
         self.view_cache = None
         self.floor_visits = {}
+        self.crossing_views={}
+        self.observed_floor=self.transfer_from=None
         self.view_anchors={}
         self.pose_task=None
         self.pose_due={}
@@ -81,6 +83,8 @@ class LiveController(base.LiveController):
 
     def clear_visits(self):
         self.floor_visits.clear()
+        self.crossing_views={}
+        self.observed_floor=self.transfer_from=None
         self.view_anchors={}
         self.pose_task=None
         self.landing_job=None;self.landing_due=0.
@@ -300,7 +304,7 @@ class LiveController(base.LiveController):
         if self.round_lock.recheck_b2_after_landing:self.proof_due=0.
         self.app.round_status.set(self.round_lock.status())
         # Drop only B3 projection state. A new landing does not relabel B2.
-        for bank in (self.view_anchors,self.pose_fixes):
+        for bank in (self.view_anchors,self.pose_fixes,getattr(self,'crossing_views',{})):
             for fid in list(bank):
                 if fid.endswith('_B3'):bank.pop(fid,None)
         self.floor_visits.pop('B3',None)
@@ -359,6 +363,7 @@ class LiveController(base.LiveController):
                 return layout==((state.landing.layout or identity) if level=='B3' else identity)
             self.floor_visits={key:v for key,v in self.floor_visits.items() if permitted_floor(v['floor']['id']) and v.get('unique_layout')}
             self.view_anchors={key:v for key,v in self.view_anchors.items() if permitted_floor(key)}
+            self.crossing_views={key:v for key,v in getattr(self,'crossing_views',{}).items() if permitted_floor(key)}
             if 'view_features' in reference and (needs_pose or wrong_cache or wrong_display or state.challenger):
                 anchor=dict(reference)
                 mat=anchor['matrix']
@@ -440,6 +445,16 @@ class LiveController(base.LiveController):
         self.sampling = True
         awaiting_opening=automatic and not manual and self.round_lock.opening_floor is None
         last_hint=last
+        observed=getattr(self,'observed_floor',None)
+        transfer_from=getattr(self,'transfer_from',None)
+        crossings=dict(getattr(self,'crossing_views',{}))
+        measured=self.view_cache
+        local_b2=self.round_lock.region_layout
+        pair_identity=pair_locked
+        if (not pair_identity and automatic and landing.layout and not blocked and
+                not self.round_lock.b1_conflict and not self.round_lock.challenger and not self.round_lock.uncertain
+                and self.round_lock.preferred('B2') in (None,landing.layout)):
+            pair_identity=landing.layout
         trusted={'B2':locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
 
@@ -531,10 +546,28 @@ class LiveController(base.LiveController):
                     moving=not stationary if probe else not same_view(sig,last['signature'])
                     origin=last.get('handoff_origin') if moving or last.get('provisional') else None
                 result=None
+                from_level=observed if observed!=floor else transfer_from
+                if (pair_identity and {from_level,floor}=={'B2','B3'} and presence['visible']
+                        and not manual and not self.warming and floor_limit in ('自动',floor)
+                        and wanted in (None,pair_identity) and (from_level=='B3' or locked==pair_identity or local_b2==pair_identity)):
+                    source_fid=pair_identity+'_'+from_level
+                    target_fid=pair_identity+'_'+floor
+                    priors=(measured,known_visit,known_b2) if from_level=='B2' else (measured,b3_visit,landing.reference)
+                    sources=[v for v in priors if self.valid_visit(v,sample,lifetime) and v['floor']['id']==source_fid
+                             and v.get('unique_layout') and not v.get('provisional')]
+                    if sources:
+                        source=max(sources,key=lambda v:v.get('sample_at',v['at']))
+                        sample['transfer_source']=source
+                        history=crossings.get(source_fid)
+                        if not self.valid_visit(history,sample,lifetime):history=None
+                        cached=[v for v in (crossings.get(target_fid),known_visit if floor=='B2' else b3_visit)
+                                if self.valid_visit(v,sample,lifetime) and v['floor']['id']==target_fid
+                                and v.get('unique_layout') and not v.get('provisional')]
+                        result=self.matcher.paired_floor(frame,source,floor,pair_identity,clear,cached,zoom,history)
                 if check_b1 and floor_limit in ('自动','B1'):
                     result=self.matcher.review_b1(frame)
                     sample['b1_checked']=True
-                if (not check_b1 and presence['visible'] and fix and wanted in (None,fix['floor']['layout_id']) and floor_limit in ('自动',floor)):
+                if (not result and not check_b1 and presence['visible'] and fix and wanted in (None,fix['floor']['layout_id']) and floor_limit in ('自动',floor)):
                     features=ViewFeatures(frame,map_area,clear)
                     sample['view_features']=features
                     corrected=self.apply_pose_fix(fix,features,sig)
@@ -565,7 +598,7 @@ class LiveController(base.LiveController):
                 if (not same_locked_floor and not independent_b1 and not result and presence['visible'] and origin and floor and self.valid_visit(origin,sample,lifetime) and
                         floor!=origin['selected_floor'] and floor_limit in ('自动',floor)
                         and wanted in (None,origin['floor']['layout_id']) and not self.warming):
-                    if pair_locked and floor=='B3' and origin['selected_floor']=='B2':
+                    if pair_locked and not sample.get('transfer_source') and floor=='B3' and origin['selected_floor']=='B2':
                         result=self.matcher.paired_b3(frame,origin,pair_locked,clear)
                     if result is None:result=self.matcher.handoff(frame,origin,floor)
                     if locked and result and result.get('provisional'):result=None
@@ -595,6 +628,7 @@ class LiveController(base.LiveController):
                 # Continuous motion still gets a bounded background audit.
                 if not tracking or positive_at-review_due.get(floor,0.)>12.:
                     attach_review()
+                paired=bool(result and sample.get('transfer_source') and result.get('search','').startswith('paired_'))
                 if result:
                     sample['camera_ms']=round((time.perf_counter()-solve_start)*1000,1)
                     def draw():
@@ -605,12 +639,12 @@ class LiveController(base.LiveController):
                         sample['draw_ms']=round((time.perf_counter()-draw_start)*1000,1)
                         return pixels
 
-                    pixels=None if tracking else draw()
-                    result['view_features']=sample.get('view_features') or ViewFeatures(frame,map_area,clear)
+                    pixels=None if tracking or paired else draw()
+                    result['view_features']=result.get('view_features') or sample.get('view_features') or ViewFeatures(frame,map_area,clear)
                     # Rendering at desktop resolution can exceed the freshness
                     # limit. Re-read the game instead of dropping an otherwise
                     # valid new-floor result every time this happens.
-                    if tracking or time.monotonic()-positive_at>.075:
+                    if tracking or paired or time.monotonic()-positive_at>.075:
                         if base.foreground()!=game.hwnd:
                             self.events.put(('sample_discard',None));return
                         fresh=base.capture(roi)
@@ -674,6 +708,9 @@ class LiveController(base.LiveController):
             self.due = 0
             return
         level=sample.get('selected_floor')
+        if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
+            self.transfer_from=getattr(self,'observed_floor',None)
+            self.observed_floor=level
         if sample.get('round_opening') and self.round_lock.observe_opening(level,sample['at']):
             self.proof_due=self.landing_due=0.
             self.note('round_opening',f'本局首次读到 {level}。',selected_floor=level)
@@ -714,7 +751,9 @@ class LiveController(base.LiveController):
         if sample.get('player_update'):
             visit,point=sample['player_update']
             if visit is self.view_cache:
-                visit['player_hd']=point
+                if point is not None:
+                    visit['player_hd']=point
+                    visit['player_at']=sample['at']
                 visit['at']=sample['at']
         if sample['presence']['visible'] and not sample.get('manual') and not sample.get('selected_floor') and self.display and self.display.get('selected_floor'):
             since=self.display.setdefault('uncertain_floor_since',now)
@@ -833,6 +872,11 @@ class LiveController(base.LiveController):
                             common_only=bool(cached.get('alternatives')),matrix=cached['matrix'].tolist(),
                             probe=cached['probe'].with_reference(sample['frame'],sample['signature']))
         cached['at'] = time.monotonic()
+        handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
+        if handoffs and not sample.get('manual'):
+            point=handoffs.player_position(sample['frame'],cached['floor'],cached['matrix'])
+            if point is not None:
+                cached['player_hd']=point;cached['player_at']=sample['at']
         self.view_cache = cached
         self.floor_cache = cached['floor']
         self.cache_identity = (sample['game'].hwnd,sample['game'].pid)
@@ -1030,8 +1074,29 @@ class LiveController(base.LiveController):
             handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
             if handoffs and not sample.get('manual'):
                 self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])
+                if self.view_cache['player_hd'] is not None:self.view_cache['player_at']=sample['at']
             if sample.get('selected_floor') == result['floor']['floor']:
+                if self.view_cache['unique_layout'] and result.get('view_features') is not None:
+                    self.view_cache['view_features']=result['view_features']
                 self.floor_visits[sample['selected_floor']] = self.view_cache
+                source=sample.get('transfer_source')
+                if (source and sample['epoch']==self.generation and self.active and self.latest
+                        and self.latest['presence']['visible'] and self.latest.get('selected_floor')==sample['selected_floor']
+                        and self.view_cache['unique_layout'] and not self.view_cache['provisional']
+                        and source['floor']['layout_id']==result['floor']['layout_id']):
+                    # Keep a small snapshot of both ends of the last transition.
+                    # A subsequent pan on either floor must not overwrite this reference.
+                    for visit in (source,self.view_cache):
+                        key=visit['floor']['id']
+                        snapshot={k:visit[k] for k in ('floor','matrix','game','roi','revision','at','unique_layout')}
+                        for k in ('player_hd','player_at','zoom','selected_floor','view_features'):
+                            if k in visit:snapshot[k]=visit[k]
+                        previous=self.crossing_views.get(key)
+                        if snapshot.get('player_hd') is None and self.valid_visit(previous,sample,lifetime):
+                            snapshot['player_hd']=previous.get('player_hd')
+                            snapshot['player_at']=previous.get('player_at')
+                        self.crossing_views[key]=snapshot
+                    self.transfer_from=None
                 features=result.get('view_features')
                 if features is not None and len(alternatives)==1 and not result.get('provisional'):
                     fid=result['floor']['id']

@@ -1,7 +1,9 @@
 """Carry a registered map camera through a shared passage on the first target frame."""
+from functools import lru_cache
 import cv2
 import numpy as np
 from .s1_alignment import geometry
+from .s1_view_motion import exclude_map_hud
 from .s1_floor_transition import FloorCoordinates,selected_floor
 
 
@@ -12,18 +14,63 @@ class FloorHandoff:
         self.floors={f['id']:f for f in matcher.floors}
         self.sites={}
 
+    @lru_cache(maxsize=6)
+    def room_components(self,fid):
+        ref=self.matcher.template(self.floors[fid])[1]
+        _,labels,stats,_=cv2.connectedComponentsWithStats(np.uint8(ref==127))
+        return labels,stats
+
     def site(self,floor,point):
-        key=(floor['id'],tuple(point))
+        pos=np.rint(np.asarray(self.coords.matrices[floor['id']])@[*point,1]).astype(int)
+        labels,stats=self.room_components(floor['id'])
+        if not (0<=pos[0]<labels.shape[1] and 0<=pos[1]<labels.shape[0]):return None
+        index=labels[pos[1],pos[0]]
+        if not index:return None
+        key=floor['id'],int(index)
         if key not in self.sites:
-            ref=self.matcher.template(floor)[1]
-            pos=np.rint(np.asarray(self.coords.matrices[floor['id']])@[*point,1]).astype(int)
-            if not (0<=pos[0]<ref.shape[1] and 0<=pos[1]<ref.shape[0]):return None
-            _,labels,stats,_=cv2.connectedComponentsWithStats(np.uint8(ref==127))
-            index=labels[pos[1],pos[0]]
-            if not index:return None
-            room=np.uint8(labels==index)
-            self.sites[key]=(room,stats[index,:4],pos)
-        return self.sites[key]
+            if len(self.sites)>=40:self.sites.pop(next(iter(self.sites)))
+            self.sites[key]=np.uint8(labels==index),stats[index,:4]
+        room,box=self.sites[key]
+        return room,box,pos
+
+    def whole_room_camera(self,small,geom,valid,floor,basis,factor,visit,target_hd,marker,shared):
+        # Without a previously seen target camera, a whole room at the player's
+        # mapped atlas position can determine translation at the measured scale.
+        site=self.site(floor,target_hd)
+        if site is None:return None
+        room,box,pos=site
+        _,labels,stats,_=cv2.connectedComponentsWithStats(np.uint8(geom==127))
+        choices=np.flatnonzero(stats[1:,4]>=70)+1
+        if len(choices)!=1:return None
+        i=choices[0];x,y,w,h=stats[i,:4]
+        if min(w,h)<12:return None
+        affine=basis.copy()*factor
+        l,t,rw,rh=box
+        room_center=np.array([l+(rw-1)/2,t+(rh-1)/2])
+        affine[:,2]=[x+(w-1)/2,y+(h-1)/2]-affine[:,:2]@room_center
+        projected=cv2.warpAffine(room,affine,geom.shape[1::-1],flags=cv2.INTER_NEAREST)
+        expected=projected>0;observed=labels==i;common=np.count_nonzero(expected&observed)
+        if (expected.sum()<.90*room.sum()*abs(np.linalg.det(affine[:,:2])) or
+                common<.89*max(expected.sum(),observed.sum()) or np.any(expected&(valid==0))):return None
+        if marker is not None:
+            mx,my=np.rint(marker*factor).astype(int)
+            if not (0<=my<expected.shape[0] and 0<=mx<expected.shape[1] and expected[my,mx]):return None
+            player_xy=affine@[*pos,1]
+            if np.linalg.norm(marker*factor-player_xy)>max(8.,min(w,h)*.28):return None
+        elif not shared:
+            # With no current marker, two same-shaped rooms at this scale are
+            # indistinguishable after recentering. Require an unambiguous footprint.
+            ids,boxes=self.room_components(floor['id'])
+            for j,(xx,yy,ww,hh,_) in enumerate(boxes[1:],1):
+                if j==ids[pos[1],pos[0]] or abs(ww-rw)>max(2,rw*.07) or abs(hh-rh)>max(2,rh*.07):continue
+                other=np.uint8(ids[yy:yy+hh,xx:xx+ww]==j)
+                shape=cv2.resize(other,(rw,rh),interpolation=cv2.INTER_NEAREST)>0
+                own=room[t:t+rh,l:l+rw]>0
+                if (shape&own).sum()>=.87*(shape|own).sum():return None
+        mat=affine/factor
+        hit=self.paired_edges(small,geom,valid,floor,mat,factor,visit,matched_return=True)
+        if hit:hit.update(search='paired_room',passage='角色对应房间')
+        return hit
 
     def inherit(self,image,visit,target,area):
         source=visit['floor'];layout=source['layout_id'];level=source['floor']
@@ -33,10 +80,11 @@ class FloorHandoff:
         if pred is None:return None
         floor=self.floors[layout+'_'+target]
         factor=min(1.,800/image.shape[1]);small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
-        geom=geometry(small)&area(small);ref=self.matcher.template(floor)[1]
+        geom=geometry(small)&exclude_map_hud(area(small));ref=self.matcher.template(floor)[1]
         ys,xs=np.nonzero(geom[::2,::2]);xy=np.stack((xs*2,ys*2),axis=1)
         observed=geom[ys*2,xs*2]
         if len(xy)<18:
+            if {level,target}=={'B2','B3'}:return None
             return self.result(floor,pred,'继承视角',0.,True) if selected_floor(image)==target else None
         check=cv2.invertAffineTransform(pred*factor)
         rx,ry=np.rint(xy@check[:,:2].T+check[:,2]).astype(int).T
@@ -111,7 +159,59 @@ class FloorHandoff:
         if 'B1' not in (level,target) and not near:return None
         return self.result(floor,mat,name,val,False)
 
-    def paired_edges(self, small, geom, valid, floor, predicted, factor, visit):
+    def passage_at(self,floor,other,player):
+        if player is None:return None
+        point=np.rint(np.asarray(self.coords.matrices[floor['id']])@[*player,1]).astype(int)
+        px,py=point
+        for name,start,end in self.coords.passages.get((floor['layout_id'],floor['floor'],other),()):
+            site=self.site(floor,start)
+            if site is None:continue
+            mask=site[0]
+            if 0<=px<mask.shape[1] and 0<=py<mask.shape[0] and mask[py,px]:
+                return name,start,end
+        return None
+
+    def refine_passage(self,small,geom,valid,floor,pose,factor,site):
+        # The character can take a few steps between observations. Search for
+        # the paired room's actual walls near the marker, without changing scale.
+        model=self.site(floor,site[2])
+        if model is None:return None
+        _,ids,stats,_=cv2.connectedComponentsWithStats(np.uint8(geom==127))
+        pcs=np.flatnonzero(stats[1:,4]>=70)+1
+        if len(pcs)!=1:return None
+        i=pcs[0];x,y,w,h=stats[i,:4]
+        if min(w,h)<12:return None
+        room=np.uint8(ids[y:y+h,x:x+w]==i)
+        room=cv2.copyMakeBorder(room,2,2,2,2,cv2.BORDER_CONSTANT)
+        # Padding in screen coordinates also preserves edges near a room's crop.
+        x-=2;y-=2;h,w=room.shape
+        if x<0 or y<0 or x+w>geom.shape[1] or y+h>geom.shape[0]:return None
+        sharp=cv2.Canny(cv2.cvtColor(small[y:y+h,x:x+w],cv2.COLOR_BGR2GRAY),25,60)
+        clear=cv2.erode(valid,np.ones((7,7),np.uint8))[y:y+h,x:x+w]>0
+        radius=max(6,round(small.shape[0]*.07))
+        affine=pose.copy()*factor
+        affine[:,2]-=(x-radius,y-radius)
+        ref=cv2.warpAffine(model[0],affine,(w+2*radius,h+2*radius),flags=cv2.INTER_NEAREST)
+        if not ref.any():return None
+        votes=[[],[]]
+        for side,(line,wall) in enumerate(zip(self.sides(room*255,sharp),self.sides(ref*255))):
+            axis=side//2
+            kernel=np.ones((8,1) if axis==0 else (1,8),np.uint8)
+            line=cv2.morphologyEx(np.uint8((line>0)&clear),cv2.MORPH_OPEN,kernel)
+            count=int(line.sum())
+            if count<8:continue
+            band=cv2.dilate(wall,np.ones((3,3),np.uint8)).astype(np.float32)
+            votes[axis].append(cv2.matchTemplate(band,line.astype(np.float32),cv2.TM_CCORR)/count)
+        if not all(votes):return None
+        score=np.minimum(np.minimum.reduce(votes[0]),np.minimum.reduce(votes[1]))
+        _,best,_,(xx,yy)=cv2.minMaxLoc(score)
+        if best<.85:return None
+        score[max(0,yy-4):yy+5,max(0,xx-4):xx+5]=-1
+        if score.max()>best-.07:return None
+        result=pose.copy();result[:,2]+=(np.array([radius-xx,radius-yy])/factor)
+        return result
+
+    def paired_edges(self, small, geom, valid, floor, predicted, factor, visit,site_hint=None,matched_return=False):
         # At the inherited camera, visible straight sides can corroborate a pose
         # even when the rounded fog boundary cuts most of the actual room away.
         _, ids, stats, _ = cv2.connectedComponentsWithStats(np.uint8(geom>0))
@@ -129,25 +229,15 @@ class FloorHandoff:
         camera=predicted*factor
         camera[:,2]-=[x,y]
         source=visit['floor']
-        if min(np.sum(observed==127),np.sum(observed==255))<25:
+        if not matched_return and min(np.sum(observed==127),np.sum(observed==255))<25:
             # A lone generic corner must have a source player at a paired passage.
-            player=visit.get('player_hd')
-            if player is None:
-                return None
-            point=np.rint(np.asarray(self.coords.matrices[source['id']])@[*player,1]).astype(int)
-            at_source=False
-            for _,start,end in self.coords.passages[source['layout_id'],'B2','B3']:
-                site=self.site(source,start)
-                if site is not None:
-                    mask=site[0];px,py=point
-                    if 0<=px<mask.shape[1] and 0<=py<mask.shape[0] and mask[py,px]:
-                        target=self.site(floor,end)
-                        if target is None:continue
-                        projected=cv2.warpAffine(target[0],camera,observed.shape[1::-1],flags=cv2.INTER_NEAREST)
-                        rooms=observed==127
-                        if rooms.any() and projected[rooms].mean()>.90:
-                            at_source=True;break
-            if not at_source:return None
+            passage=site_hint or self.passage_at(source,floor['floor'],visit.get('player_hd'))
+            if passage is None:return None
+            target=self.site(floor,passage[2])
+            if target is None:return None
+            projected=cv2.warpAffine(target[0],camera,observed.shape[1::-1],flags=cv2.INTER_NEAREST)
+            rooms=observed==127
+            if not rooms.any() or projected[rooms].mean()<.90:return None
         reference=self.matcher.template(floor)[1]
         model=cv2.warpAffine(reference,camera,observed.shape[1::-1],flags=cv2.INTER_NEAREST)
         sharp=cv2.Canny(cv2.cvtColor(small[crop],cv2.COLOR_BGR2GRAY),25,60)
@@ -217,8 +307,8 @@ class FloorHandoff:
                     consistency=score,segmentation='floor_handoff',search='floor_handoff',
                     passage=link,provisional=provisional,candidates=[],reason='继承楼层位置')
 
-    def player_position(self,image,floor,mat):
-        if floor['id'] not in self.coords.matrices:return None
+    @staticmethod
+    def player_screen(image):
         h,w=image.shape[:2];factor=min(1.,640/w)
         small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
         mask=cv2.inRange(cv2.cvtColor(small,cv2.COLOR_BGR2HSV),(16,110,170),(39,255,255))
@@ -227,8 +317,18 @@ class FloorHandoff:
         for stat,point in zip(stats[1:],points[1:]):
             if not 6<=stat[4]<=160:continue
             center=point/factor;distance=np.linalg.norm(center-[w*.58,h*.50])
-            if distance<h*.20:candidates.append((float(distance),center))
+            x,y=center
+            if not (.17*w<x<.86*w and .125*h<y<.90*h):continue
+            if (x<w*.345 and y<h*.31) or (x<w*.35 and y>h*.56) or (x>w*.83 and y>h*.835):continue
+            candidates.append((float(distance),center))
         candidates.sort(key=lambda a:a[0])
-        if not candidates or (len(candidates)>1 and candidates[1][0]-candidates[0][0]<h*.02):return None
+        if not candidates:return None
+        if len(candidates)>1 and (candidates[0][0]>=h*.20 or candidates[1][0]-candidates[0][0]<h*.02):return None
+        return candidates[0][1]
+
+    def player_position(self,image,floor,mat):
+        if floor['id'] not in self.coords.matrices:return None
+        screen=self.player_screen(image)
+        if screen is None:return None
         xf=mat@np.vstack((self.coords.matrices[floor['id']],[0,0,1]))
-        return cv2.invertAffineTransform(xf)@[*candidates[0][1],1]
+        return cv2.invertAffineTransform(xf)@[*screen,1]

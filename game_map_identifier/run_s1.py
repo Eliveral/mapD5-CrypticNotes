@@ -11,7 +11,7 @@ if __name__ == '__main__':
         from src.config import project_root
         from src.s1_catalog import S1Catalog, read_image
         from src.s1_live_match import LiveMatcher,map_area
-        from src.s1_view_motion import ViewFeatures
+        from src.s1_view_motion import ViewFeatures,zoom_position
         from src.s1_floor_transition import selected_floor
         from src.s1_visibility import MapVisibility
         from src.s1_round_lock import RoundLock
@@ -24,15 +24,6 @@ if __name__ == '__main__':
         matcher = LiveMatcher(c)
         lock=RoundLock()
         prior=None
-        if '--prior-capture' in sys.argv:
-            prior_image=read_image(Path(sys.argv[sys.argv.index('--prior-capture')+1]))
-            prior_level=selected_floor(prior_image)
-            if prior_level and MapVisibility(c.root/'ui').inspect(prior_image)['visible']:
-                previous=matcher.locate_selected(prior_image,None,prior_level)
-                if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:
-                    prior=previous
-                    prior['unique_layout']=True
-                    prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         for i,arg in enumerate(sys.argv):
             if arg=='--enter-floor':
                 level=sys.argv[i+1]
@@ -54,8 +45,25 @@ if __name__ == '__main__':
                 proof.update(at=i,unique_layout=True,player_hd=matcher.handoffs.player_position(image,proof['floor'],proof['matrix']))
                 if lock.observe(proof):
                     prior,prior_image,prior_level=proof,image,'B2'
+        if '--prior-capture' in sys.argv:
+            explicit_image=read_image(Path(sys.argv[sys.argv.index('--prior-capture')+1]))
+            explicit_level=selected_floor(explicit_image)
+            if explicit_level and MapVisibility(c.root/'ui').inspect(explicit_image)['visible']:
+                previous=matcher.locate_selected(explicit_image,lock.preferred(explicit_level),explicit_level)
+                if previous['accepted'] and len(previous.get('possible_layouts',[]))==1:
+                    prior_image,prior_level=explicit_image,explicit_level
+                    prior=previous
+                    prior['unique_layout']=True
+                    prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         landing_pose=None
-        if presence['visible'] and selected=='B3':
+        certified=lock.layout or lock.landing.layout
+        if (prior and presence['visible'] and {selected,prior['floor']['floor']}=={'B2','B3'}
+                and certified and not lock.blocks_floor(selected) and not lock.blocks_floor(prior['floor']['floor'])
+                and lock.preferred(selected) in (None,certified) and lock.preferred(prior['floor']['floor'])==certified
+                and (lock.layout==certified or prior['floor']['floor']=='B3' or lock.region_layout==certified)):
+            prior['zoom']=zoom_position(prior_image)
+            landing_pose=matcher.paired_floor(frame,prior,selected,certified,zoom=zoom_position(frame))
+        if landing_pose is None and presence['visible'] and selected=='B3':
             base=None if lock.blocks_floor('B2') else lock.layout
             current=matcher.review_landing(frame,incumbent=lock.landing.layout or base,pending=lock.landing.pending)
             if current:
@@ -79,10 +87,9 @@ if __name__ == '__main__':
         elif lock.blocks_floor(selected):
             r={'accepted':False}
         elif selected:
-            if selected=='B2' and prior and prior['floor']['floor']!='B2':
+            if selected=='B2' and prior and prior['floor']['floor']!='B2' and not landing_pose:
                 prior=None
             r=landing_pose
-            if r is None and selected=='B3' and target_layout==lock.layout:r=matcher.paired_b3(frame,prior,lock.layout)
             if r is None and prior:r=matcher.handoff(frame,prior,selected)
             if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
