@@ -5,7 +5,7 @@ from .s1_view_motion import ViewFeatures
 from .s1_entrance import turns
 
 
-def compare_walls(matcher,image,area,clear,full=None):
+def compare_walls(matcher,image,area,clear,full=None,level='B2'):
     features=ViewFeatures(image,area,clear)
     g=features.geom
     _,_,stats,centers=cv2.connectedComponentsWithStats(np.uint8(g==127))
@@ -14,7 +14,7 @@ def compare_walls(matcher,image,area,clear,full=None):
     corners,_=turns(g,3)
     if len(corners)<10:return None,{}
     finder=matcher.pose_check.hd_walls
-    floors=[f for f in matcher.floors if f['floor']=='B2']
+    floors=[f for f in matcher.floors if f['floor']==level]
     rows=[]
     # Compare scales in HD pixels; different atlas templates use different crops/resolutions.
     if full:
@@ -39,6 +39,7 @@ def compare_walls(matcher,image,area,clear,full=None):
     best=rows[0];n=best['inliers']
     rival=max(best['rival'],rows[1]['inliers'] if len(rows)>1 else 0)
     if n<max(10,len(corners)*.27) or n-rival<max(3,n*.20) or best['consistency']<.90:return None,score
-    best.update(search='b2_wall_review',segmentation='b2_wall_review',proof_kind='partial')
+    method=level.lower()+'_wall_review'
+    best.update(search=method,segmentation=method,proof_kind='partial')
     return best,score
 

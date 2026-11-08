@@ -302,6 +302,17 @@ class LiveMatcher(FloorMatcher):
                 if result['accepted'] or result.get('candidates'): break
         return result
 
+    def review_landing(self,image,clear=None,incumbent=None):
+        # A B2 passage and a previous B3 visit are position hints only. Compare
+        # all B3 images on real unpainted pixels, without supplying their IDs.
+        full=self._locate_live(image,None,'B3',1280,1024,verification=True,clear=clear)
+        full=full if self.broad_b2(full,image.shape) else None
+        hit,support=compare_walls(self,image,map_area,clear,full,level='B3')
+        if not hit or (full and hit['floor']['id']!=full['floor']['id']):return None
+        if incumbent not in (None,hit['floor']['layout_id']) and support.get(incumbent,0)>=.70*hit['inliers']:
+            return None
+        return hit
+
     def confirm_b2(self,image,clear=None,incumbent=None):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.

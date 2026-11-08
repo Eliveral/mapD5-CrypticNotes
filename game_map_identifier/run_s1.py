@@ -34,6 +34,13 @@ if __name__ == '__main__':
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         for i,arg in enumerate(sys.argv):
+            if arg=='--landing-frame':
+                image=read_image(Path(sys.argv[i+1]))
+                if selected_floor(image)=='B3' and MapVisibility(c.root/'ui').inspect(image)['visible']:
+                    base=None if lock.blocks_floor('B2') else lock.layout
+                    hit=matcher.review_landing(image,incumbent=lock.landing.layout or base)
+                    if hit:lock.observe_landing(dict(hit,at=i))
+                continue
             if arg!='--confirm-b2':continue
             image=read_image(Path(sys.argv[i+1]))
             if selected_floor(image)!='B2' or not MapVisibility(c.root/'ui').inspect(image)['visible']:continue
@@ -42,17 +49,32 @@ if __name__ == '__main__':
                 proof.update(at=i,unique_layout=True,player_hd=matcher.handoffs.player_position(image,proof['floor'],proof['matrix']))
                 if lock.observe(proof):
                     prior,prior_image,prior_level=proof,image,'B2'
+        landing_pose=None
+        if presence['visible'] and selected=='B3':
+            base=None if lock.blocks_floor('B2') else lock.layout
+            current=matcher.review_landing(frame,incumbent=lock.landing.layout or base)
+            if current:
+                lock.observe_landing(dict(current,at=len(sys.argv)))
+                if lock.permits_overlay('B3',current['floor']['layout_id'],current['possible_layouts']):
+                    landing_pose=current
+        if presence['visible'] and selected=='B2' and lock.recheck_b2_after_landing:
+            proof=matcher.confirm_b2(frame,incumbent=lock.layout)
+            if proof:lock.observe(dict(proof,at=len(sys.argv),unique_layout=True))
         target_layout=lock.preferred(selected)
+        if prior and selected=='B3' and target_layout and prior['floor']['layout_id']!=target_layout:prior=None
         if not presence['visible']:
             r = {'accepted':False}
         elif selected=='B1':
             r=matcher.review_b1(frame) or {'accepted':False}
-        elif lock.uncertain or (lock.challenger and selected!='B2'):
+        elif selected and selected not in ('B1','B2','B3'):
+            r={'accepted':False}
+        elif lock.blocks_floor(selected):
             r={'accepted':False}
         elif selected:
             if selected=='B2' and prior and prior['floor']['floor']!='B2':
                 prior=None
-            r=matcher.paired_b3(frame,prior,lock.layout) if selected=='B3' else None
+            r=landing_pose
+            if r is None and selected=='B3' and target_layout==lock.layout:r=matcher.paired_b3(frame,prior,lock.layout)
             if r is None and prior:r=matcher.handoff(frame,prior,selected)
             if lock.layout and r and r.get('provisional'):r=None
             if prior and not r:
@@ -83,6 +105,7 @@ if __name__ == '__main__':
         result={'map_visible':presence['visible'],'accepted':r['accepted'],
                 'selected_floor':selected, 'method':r.get('segmentation'),
                 'round_layout':lock.layout,'b2_votes':lock.count,'b2_proposed':lock.challenger,'review_count':lock.proposal_count,
+                'b3_local':lock.landing.layout,'b3_pending':lock.landing.pending,
                 'pose_adjustment':correction and correction['adjustment'],
                 'wall_error_before_px':correction and correction['before_px'],
                 'wall_error_after_px':correction and correction['after_px'],

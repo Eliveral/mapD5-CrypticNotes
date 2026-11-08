@@ -235,6 +235,8 @@ class LiveController:
                 badge = '检测已开启 · 截图重试中'
             elif state == 'map_closed':
                 badge = '检测已开启 · 地图未展开'
+            elif state == 'unsupported_floor':
+                badge = f"当前 {details.get('selected_floor','')} · 图库尚未收录"
             elif state == 'map_unmatched':
                 locked=details.get('round_layout')
                 badge = f'本局布局 {locked[3:]} · 正在定位' if locked else '地图已展开 · 尚未确定布局'
@@ -255,7 +257,7 @@ class LiveController:
         self.history = self.history[-200:]
         try:
             self.diagnostics.mkdir(parents=True, exist_ok=True)
-            if state in ('round_locked','round_rechecking','round_corrected','round_reset','b2_conflict','pose_offset') or (
+            if state in ('round_locked','round_rechecking','round_corrected','round_reset','b2_conflict','pose_offset','landing_rechecking','landing_confirmed','unsupported_floor') or (
                     state=='overlay_shown' and details.get('floor_id')):
                 # Keep the submitted floor and its lock together beyond the short
                 # screen-state buffer. Two bounded files, no images or input events.
