@@ -512,6 +512,12 @@ class LiveController(base.LiveController):
         trusted={'B2':local_b2 or locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
         reviewed=dict(self.review_signatures)
+        shared_layout=self.round_lock.shared_layout if automatic else None
+        pointer_observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
+        pointer_ready=getattr(getattr(self,'hotkeys',None),'mouse_ready',False) is True
+        continuous=bool(self.display and self.overlay._visible and self.latest and self.latest['presence']['visible']
+                        and measured and self.display.get('label')==measured['floor']['id']
+                        and self.latest.get('selected_floor')==measured['selected_floor'])
 
         def grab():
             began = time.monotonic()
@@ -568,6 +574,7 @@ class LiveController(base.LiveController):
                         max(scores.values(),default=0)>.52 and time.monotonic()-getattr(self,'last_strong_map',0)<.20):
                     presence=dict(presence,visible=True,bridged=True)
                 positive_at=time.monotonic()
+                pointer=pointer_observer.snapshot() if pointer_ready else None
                 zoom=zoom_position(frame) if presence['visible'] and not manual else None
                 changed_zoom=bool(probe and zoom_changed(probe.zoom,zoom))
                 stationary = bool(probe and presence['visible'] and not changed_zoom and probe.stationary(frame, opacity))
@@ -585,7 +592,7 @@ class LiveController(base.LiveController):
                 sig=signature(frame) if presence['visible'] else None
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
                     scale_reference=reference,zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
-                    at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
+                    pointer=pointer,at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
                 if (check_b1 and not probe and not self.display and last and
                         self.valid_visit(last,sample,30) and positive_at-last.get('sample_at',0)<1.5 and
                         'probe' in last and self.matches_clean_view(last,sample)):
@@ -610,13 +617,18 @@ class LiveController(base.LiveController):
                     return
                 solve_start=time.perf_counter()
                 result=None
+                if (shared_layout and presence['visible'] and floor in ('B1','B2','B3')
+                        and not manual and not self.warming and floor_limit in ('自动',floor)
+                        and self.valid_visit(measured,sample,lifetime) and measured['floor']['layout_id']==shared_layout):
+                    result=self.matcher.shared_floor(frame,measured,floor,clear,zoom,pointer,continuous)
+                    if result:sample['transfer_source']=measured
                 elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and not locked))
                                  and automatic and not manual and not self.warming and floor_limit in ('自动','B2')
                                  and presence['visible'] and self.valid_visit(b1_visit,sample,300)
                                  and b1_visit.get('unique_layout') and not b1_visit.get('provisional'))
                 new_b2_view=(not self.display or observed=='B1' or (not probe and measured
                              and not same_view(sig,measured.get('signature'))))
-                if elevator_source and (changing or (not probe and new_b2_view)):
+                if not result and elevator_source and (changing or (not probe and new_b2_view)):
                     result=self.matcher.elevators.locate(frame,map_area,b1_visit,clear,zoom)
                     if result:sample['elevator_source']=b1_visit
                 if presence['visible'] and floor in blocked and not result:
@@ -642,12 +654,14 @@ class LiveController(base.LiveController):
                                  and v.get('unique_layout') and not v.get('provisional')),None)
                     sample['device_points']=device_points(frame,map_area,clear)
                     result=self.matcher.locate_device(frame,trusted[floor],floor,clear,source,zoom,points=sample['device_points'])
-                if (not result and pair_identity and {from_level,floor}=={'B2','B3'} and presence['visible']
+                if (not result and pair_identity and from_level!=floor and from_level in ('B1','B2','B3')
+                        and floor in ('B1','B2','B3') and presence['visible']
                         and not manual and not self.warming and floor_limit in ('自动',floor)
                         and wanted in (None,pair_identity) and (from_level=='B3' or locked==pair_identity or local_b2==pair_identity)):
                     source_fid=pair_identity+'_'+from_level
                     target_fid=pair_identity+'_'+floor
-                    priors=(measured,known_visit,known_b2) if from_level=='B2' else (measured,b3_visit,landing.reference)
+                    priors={'B1':(measured,b1_visit),'B2':(measured,known_visit,known_b2),
+                            'B3':(measured,b3_visit,landing.reference)}[from_level]
                     sources=[v for v in priors if self.valid_visit(v,sample,lifetime) and v['floor']['id']==source_fid
                              and v.get('unique_layout') and not v.get('provisional')]
                     if sources:
@@ -655,11 +669,11 @@ class LiveController(base.LiveController):
                         sample['transfer_source']=source
                         history=crossings.get(source_fid)
                         if not self.valid_visit(history,sample,lifetime):history=None
-                        cached=[v for v in (crossings.get(target_fid),known_visit if floor=='B2' else b3_visit)
+                        cached=[v for v in (crossings.get(target_fid),{'B1':b1_visit,'B2':known_visit,'B3':b3_visit}[floor])
                                 if self.valid_visit(v,sample,lifetime) and v['floor']['id']==target_fid
                                 and v.get('unique_layout') and not v.get('provisional')]
                         result=self.matcher.paired_floor(frame,source,floor,pair_identity,clear,cached,zoom,history)
-                if check_b1 and floor_limit in ('自动','B1'):
+                if not result and check_b1 and floor_limit in ('自动','B1'):
                     result=self.matcher.review_b1(frame)
                     sample['b1_checked']=True
                 if (not result and not check_b1 and presence['visible'] and fix and wanted in (None,fix['floor']['layout_id']) and floor_limit in ('自动',floor)):
@@ -725,7 +739,7 @@ class LiveController(base.LiveController):
                 # Continuous motion still gets a bounded background audit.
                 if not tracking or positive_at-review_due.get(floor,0.)>12.:
                     attach_review()
-                paired=bool(result and sample.get('transfer_source') and result.get('search','').startswith('paired_'))
+                paired=bool(result and sample.get('transfer_source') and (result.get('search','').startswith('paired_') or result.get('shared_camera')))
                 if result:
                     sample['camera_ms']=round((time.perf_counter()-solve_start)*1000,1)
                     def draw():
@@ -748,6 +762,7 @@ class LiveController(base.LiveController):
                         check=self.visibility.inspect(fresh,fast=True)
                         new_floor=selected_floor(fresh)
                         checked=time.monotonic()
+                        current_pointer=pointer_observer.snapshot() if pointer_ready else None
                         if probe:
                             fresh=probe.uncovered_frame(fresh)
                             clear=probe.unpainted
@@ -758,17 +773,23 @@ class LiveController(base.LiveController):
                                       checked_at=checked,stationary=False,zoom=new_zoom,
                                       zoom_changed=bool(probe and zoom_changed(probe.zoom,new_zoom)))
                         sample.pop('view_features',None);sample.pop('player_update',None)
+                        if result.get('shared_camera') and current_pointer!=pointer:
+                            result=None
+                        sample['pointer']=current_pointer
                         if not check['visible'] or floor!=new_floor:
                             result=None
                             sample.pop('b2_pixels',None);sample.pop('b3_pixels',None)
-                        elif not np.array_equal(fresh,frame):
+                        elif result is not None and not np.array_equal(fresh,frame):
                             now_features=ViewFeatures(fresh,map_area,clear)
                             previous_features=result['view_features']
                             changed=(zoom_changed(zoom,new_zoom) or not same_view(sig,new_sig)
                                      or not previous_features.same_pixels(now_features))
                             if changed:
                                 sample.pop('device_points',None)
-                            if changed and (result.get('search')=='b1_b2_elevator' or result.get('device_kind')):
+                            if changed and result.get('shared_camera'):
+                                result=self.matcher.shared_floor(fresh,measured,floor,clear,new_zoom,current_pointer,continuous)
+                                pixels=None
+                            elif changed and (result.get('search')=='b1_b2_elevator' or result.get('device_kind')):
                                 result=None
                                 sample.pop('b2_pixels',None)
                             elif changed:
@@ -876,6 +897,7 @@ class LiveController(base.LiveController):
                     visit['player_hd']=point
                     visit['player_at']=sample['at']
                 visit['at']=sample['at']
+                if sample.get('pointer') is not None:visit['pointer']=sample['pointer']
         if sample['presence']['visible'] and not sample.get('manual') and not sample.get('selected_floor') and self.display and self.display.get('selected_floor'):
             since=self.display.setdefault('uncertain_floor_since',now)
             if now-since<.16:
@@ -1122,7 +1144,7 @@ class LiveController(base.LiveController):
         self.accept_match(payload)
 
     def check_b1_conflict(self,sample,result):
-        if (self.app.layout_limit.get()!='自动' or result['floor']['floor']!='B1'
+        if (self.app.layout_limit.get()!='自动' or result.get('shared_camera') or result['floor']['floor']!='B1'
                 or sample['epoch']!=self.generation):return
         candidates=result.get('possible_layouts') or [result['floor']['layout_id']]
         elevator=self.round_lock.elevator
@@ -1219,6 +1241,11 @@ class LiveController(base.LiveController):
         if self.view_cache and self.view_cache.get('sample_at',0)>sample['at']:
             self.start_match()
             return
+        if result.get('shared_camera'):
+            observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
+            if observer is None or sample.get('pointer')!=observer.snapshot():
+                self.due=0.
+                return
         if result.get('accepted') and self.device_conflict(sample,result['floor'],result['matrix']):return
         if result['accepted'] and not self.has_current_pose(sample,result):
             self.request_current_pose(sample)
@@ -1278,6 +1305,7 @@ class LiveController(base.LiveController):
                                    matrix=np.array(result['matrix'],copy=True),
                                    unique_layout=len(alternatives)==1 and not result.get('shared_elevator_only'),
                                    shared_elevator_only=bool(result.get('shared_elevator_only')),possible_layouts=alternatives,
+                                   shared_camera=bool(result.get('shared_camera')),camera_only=bool(result.get('camera_only')),pointer=sample.get('pointer'),
                                    provisional=bool(result.get('provisional')),
                                    handoff_origin=result.get('handoff_origin'),
                                    alternatives=result.get('common_floors'))
@@ -1290,7 +1318,7 @@ class LiveController(base.LiveController):
                     self.view_cache['view_features']=result['view_features']
                 self.floor_visits[sample['selected_floor']] = self.view_cache
                 source=sample.get('transfer_source')
-                if (source and sample['epoch']==self.generation and self.active and self.latest
+                if (source and source['floor']['floor']!=result['floor']['floor'] and sample['epoch']==self.generation and self.active and self.latest
                         and self.latest['presence']['visible'] and self.latest.get('selected_floor')==sample['selected_floor']
                         and self.view_cache['unique_layout'] and not self.view_cache['provisional']
                         and source['floor']['layout_id']==result['floor']['layout_id']):
@@ -1308,7 +1336,7 @@ class LiveController(base.LiveController):
                         self.crossing_views[key]=snapshot
                     self.transfer_from=None
                 features=result.get('view_features')
-                if features is not None and self.view_cache['unique_layout'] and not result.get('provisional'):
+                if features is not None and self.view_cache['unique_layout'] and not result.get('provisional') and not result.get('camera_only'):
                     fid=result['floor']['id']
                     anchor={k:self.view_cache[k] for k in ('game','revision','roi','at','matrix','handoff_origin')}
                     anchor['view_features']=features
@@ -1328,7 +1356,7 @@ class LiveController(base.LiveController):
                     if detailed is not None and not any(v is detailed for v in kept[:5]):
                         kept=kept[:4]+[detailed]
                     self.view_anchors[fid]=(anchor,*kept[:5])
-            if result.get('search') not in ('camera_pan','camera_zoom'):
+            if not result.get('camera_only') and result.get('search') not in ('camera_pan','camera_zoom'):
                 self.check_pose(sample,self.view_cache,style)
             self.note('common_floor' if result.get('common_floors') else 'layout_learned', layout=result['floor']['id'], possible_layouts=alternatives, elapsed=elapsed,
                       inliers=result['inliers'], capture_epoch=sample['epoch'])
@@ -1342,6 +1370,7 @@ class LiveController(base.LiveController):
                                     epoch=self.generation, game=game, selected_floor=sample.get('selected_floor'),
                                     label=result['floor']['id'],summary=summary,provisional=result.get('provisional',False),
                                     search=result.get('search'),passage=result.get('passage'),probe=probe,
+                                    pointer=sample.get('pointer'),shared_camera=bool(result.get('shared_camera')),
                                     possible_layouts=alternatives,common_only=bool(result.get('common_floors')),
                                     matrix=result['matrix'].tolist(),shift_px=result.get('shift_px'))
                 self.show_display()
@@ -1385,6 +1414,8 @@ class LiveController(base.LiveController):
                 zoom_changed(d.get('zoom'),current.get('zoom')) or
                 d.get('selected_floor') != current.get('selected_floor') or
                 base.foreground() != d['game'].hwnd or base.refresh_game(d['game']) != d['game']): return
+        observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
+        if d.get('shared_camera') and (observer is None or d.get('pointer')!=observer.snapshot()):return
         label=d.get('label')
         if self.app.layout_limit.get()=='自动' and label:
             layout,level=label.rsplit('_',1)
@@ -1459,6 +1490,9 @@ class LiveController(base.LiveController):
         except queue.Empty: pass
         if self.active and not self.suspended:
             ready = self.sync_target()
+            if getattr(self,'hotkeys',None):
+                self.hotkeys.pointer.configure((self.game.hwnd,self.capture_bounds()) if ready and not self.hidden else None)
             if ready and not self.hidden and not self.sampling and time.monotonic() >= self.due:
                 self.launch()
+        if getattr(self,'hotkeys',None) and (not self.active or self.suspended):self.hotkeys.pointer.configure(None)
         self.app.after(10, self.tick)

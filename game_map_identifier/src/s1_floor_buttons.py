@@ -46,7 +46,7 @@ def _floor_at(image,x,y):
     return None
 
 
-def selected_floor(image):
+def selected_button(image):
     h,w=image.shape[:2]
     x=w-round(.22*h);pad=max(1,round(.002*h));wing=round(.014*h)
     if h<240 or x-wing-pad<0 or x+wing+pad>=w:return None
@@ -63,4 +63,10 @@ def selected_floor(image):
     bands=[run for run in np.split(hits,np.flatnonzero(np.diff(hits)>1)+1) if .034*h<len(run)<.090*h]
     if len(bands)!=1:return None
     mid=a+round((bands[0][0]+bands[0][-1])*.5)
-    return _floor_at(image,x,mid)
+    level=_floor_at(image,x,mid)
+    return (level,x,mid) if level else None
+
+
+def selected_floor(image):
+    selected=selected_button(image)
+    return selected[0] if selected else None

@@ -5,6 +5,7 @@ import threading
 
 from .s1_keys import MapBinding, MODIFIER, MOUSE, CTRL, ALT, SHIFT, WIN, physical_key
 from .s1_game import KeyEdges
+from .s1_map_camera import MapPointer
 
 SHORTCUTS={701:(0x77,'once'),702:(0x76,'auto'),703:(0x78,'hide'),704:(0x79,'stop')}
 BUTTON_MESSAGES={0x201:(1,True),0x202:(1,False),0x204:(2,True),0x205:(2,False),
@@ -26,6 +27,7 @@ class Hotkeys:
         self.edges=KeyEdges()
         self.set_map_key(map_key)
         self.capture=None
+        self.pointer=MapPointer()
         self.keyboard_ready=None
         self.mouse_ready=None
         self.stop_event=threading.Event()
@@ -82,6 +84,9 @@ class Hotkeys:
         @HOOKPROC
         def mouse(code,message,address):
             try:
+                if code>=0 and self.pointer.target is not None:
+                    d=ctypes.cast(address,ctypes.POINTER(MouseData)).contents
+                    self.pointer.observe(message,(d.pt.x,d.pt.y),u.GetForegroundWindow())
                 if code>=0 and (message in BUTTON_MESSAGES or message in (0x20B,0x20C)):
                     d=ctypes.cast(address,ctypes.POINTER(MouseData)).contents
                     if message in BUTTON_MESSAGES:
@@ -104,7 +109,7 @@ class Hotkeys:
             msg=W.MSG()
             while not self.stop_event.is_set():
                 binding=self.edges.binding
-                needed=self.capture is not None or (binding is not None and binding.key in MOUSE)
+                needed=self.capture is not None or self.pointer.target is not None or (binding is not None and binding.key in MOUSE)
                 if needed!=want_mouse:
                     if needed:
                         mouse_hook=u.SetWindowsHookExW(14,mouse,None,0)

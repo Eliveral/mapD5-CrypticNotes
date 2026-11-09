@@ -14,6 +14,7 @@ from .s1_elevator import ElevatorMatcher
 from .s1_blackboard import board_pose
 from .s1_devices import FixedDevices,device_points
 from .s1_handoff import FloorHandoff
+from .s1_map_camera import shared_floor
 from .s1_fixed_walls import FixedWalls
 from .s1_pose_check import PoseCheck
 from .s1_b2_review import compare_walls,check_partial_edges
@@ -60,7 +61,7 @@ class LiveMatcher(FloorMatcher):
             if floor['floor']=='B2':self.elevators.reference(floor['layout_id'])
 
     def prepare_paired_floor(self, layout):
-        for level,other in (('B2','B3'),('B3','B2')):
+        for level,other in (('B1','B2'),('B2','B3'),('B3','B2')):
             floor=self.handoffs.floors.get(layout+'_'+level)
             sites=self.coordinates.passages.get((layout,level,other))
             if floor and sites:
@@ -95,6 +96,9 @@ class LiveMatcher(FloorMatcher):
         if board and (not other or not other.get('device_pair')):return None
         return other
 
+    def shared_floor(self,image,visit,target,clear=None,zoom=None,pointer=None,continuous=False):
+        return shared_floor(self,image,map_area,visit,target,clear,zoom,pointer,continuous)
+
     def paired_b3(self,image,visit,locked,clear=None):
         return self.paired_floor(image,visit,'B3',locked,clear)
 
@@ -102,7 +106,7 @@ class LiveMatcher(FloorMatcher):
         if not visit or not layout or not visit.get('unique_layout') or visit.get('provisional'):
             return None
         source=visit['floor'];level=source['floor']
-        if ({level,target}!={'B2','B3'} or source['layout_id']!=layout
+        if (level==target or source['layout_id']!=layout
                 or (layout,level,target) not in self.coordinates.passages):
             return None
         predicted,_=self.coordinates.predict(visit,target)

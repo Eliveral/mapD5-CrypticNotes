@@ -6,7 +6,7 @@ def direct_pose(hit, paired=False):
                   'b1_b2_elevator','b2_recheck','b3_wall_review') or hit.get('device_kind'):
         return True
     return paired and method in ('paired_player','paired_player_adjust','paired_return',
-                                 'paired_return_adjust','paired_return_view','paired_room','paired_camera')
+                                 'paired_return_adjust','paired_return_view','paired_room','paired_camera','shared_camera')
 
 
 class LandingReview:
@@ -118,6 +118,14 @@ class RoundLock:
         if self.layout and self.proposal and self.proposal['floor']['layout_id']!=self.layout:
             return self.proposal['floor']['layout_id']
         return None
+
+    @property
+    def shared_layout(self):
+        if (self.uncertain or self.challenger or self.b1_conflict or self.b2_arrival
+                or self.recheck_b2_after_landing or self.landing.waiting or self.landing.pending):
+            return None
+        layout=self.layout or self.landing.layout
+        return layout if self.landing.layout in (None,layout) else None
 
     def preferred(self,level):
         if level=='B1':return None

@@ -56,8 +56,17 @@ if __name__ == '__main__':
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         landing_pose=None
-        if (prior and prior['floor']['floor']=='B1' and selected=='B2' and presence['visible']
-                and lock.opening_floor not in ('B2','B3','B4')):
+        if '--shared-floor-click' in sys.argv and prior and lock.shared_layout and selected:
+            from src.s1_map_camera import PointerSnapshot
+            from src.s1_floor_buttons import selected_button
+            button=selected_button(frame)
+            if button:
+                prior=dict(prior,at=-2.,sample_at=-2.,zoom=zoom_position(prior_image),
+                           pointer=PointerSnapshot(1,(0.,0.),-3.,0.))
+                landing_pose=matcher.shared_floor(frame,prior,selected,zoom=zoom_position(frame),
+                    pointer=PointerSnapshot(1,(0.,0.),-1.,button[2]),continuous=True)
+        if (landing_pose is None and prior and prior['floor']['floor']=='B1' and selected=='B2' and presence['visible']
+                and lock.shared_layout is None and lock.opening_floor not in ('B2','B3','B4')):
             prior['zoom']=zoom_position(prior_image)
             lift=matcher.elevators.locate(frame,map_area,prior,zoom=zoom_position(frame))
             if lift:
@@ -79,7 +88,7 @@ if __name__ == '__main__':
         if landing_pose is None and certified and selected in ('B2','B3') and presence['visible'] and not lock.blocks_floor(selected):
             if prior:prior['zoom']=zoom_position(prior_image)
             landing_pose=matcher.locate_device(frame,lock.preferred(selected),selected,visit=prior,zoom=zoom_position(frame))
-        if (landing_pose is None and prior and presence['visible'] and {selected,prior['floor']['floor']}=={'B2','B3'}
+        if (landing_pose is None and prior and presence['visible'] and selected in ('B1','B2','B3') and selected!=prior['floor']['floor']
                 and certified and not lock.blocks_floor(selected) and not lock.blocks_floor(prior['floor']['floor'])
                 and lock.preferred(selected) in (None,certified) and lock.preferred(prior['floor']['floor'])==certified
                 and (lock.layout==certified or prior['floor']['floor']=='B3' or lock.region_layout==certified)):
@@ -103,6 +112,8 @@ if __name__ == '__main__':
         if prior and selected=='B3' and target_layout and prior['floor']['layout_id']!=target_layout:prior=None
         if not presence['visible']:
             r = {'accepted':False}
+        elif landing_pose and direct_pose(landing_pose,paired=True):
+            r=landing_pose
         elif selected=='B1':
             r=matcher.review_b1(frame) or {'accepted':False}
         elif selected not in ('B1','B2','B3'):
@@ -171,6 +182,7 @@ if __name__ == '__main__':
                 'render_sha256':hashlib.sha256(rendered.tobytes()).hexdigest() if rendered is not None else None,
                 'floor':r.get('floor',{}).get('id'),'inliers':r.get('inliers'),
                 'matrix':r['matrix'].tolist() if r['accepted'] else None,
+                'shared_camera':bool(r.get('shared_camera')),'camera_only':bool(r.get('camera_only')),
                 'capture_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
                 'scope':'Saved frame replay; no live input or projection'}
         (project_root()/'s1-capture-check.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
