@@ -68,25 +68,34 @@ class MapPointer:
                 self.drag=None
 
 
-def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=None,continuous=False):
-    if not visit or not visit.get('unique_layout') or visit.get('provisional'):return None
+def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=None,continuous=False,audit=None):
+    report=audit if audit is not None else {}
+    def reject(reason):
+        report['reason']=reason
+        return None
+    if not visit or not visit.get('unique_layout') or visit.get('provisional'):return reject('unverified_source')
     source=visit['floor']
-    if target not in ('B1','B2','B3'):return None
+    if target not in ('B1','B2','B3'):return reject('unsupported_floor')
     before=visit.get('zoom')
-    if before is None or zoom is None or zoom_changed(before,zoom):return None
+    if before is None or zoom is None or zoom_changed(before,zoom):return reject('zoom_changed_or_unknown')
     floor=matcher.handoffs.floors.get(source['layout_id']+'_'+target)
-    matrix,_=matcher.coordinates.predict(visit,target)
-    if floor is None or matrix is None:return None
+    matrix=visit.get('floor_matrices',{}).get(target)
+    if matrix is None:matrix,_=matcher.coordinates.predict(visit,target)
+    if floor is None or matrix is None:return reject('missing_calibration')
     previous=visit.get('pointer')
     same_input=continuous and previous is not None and pointer is not None and previous.epoch==pointer.epoch
     if same_input:
         matrix=matrix.copy()
         matrix[:,2]+=np.asarray(pointer.pan)-previous.pan
     button=selected_button(image) if same_input else None
+    # A source frame can arrive after the click but before the new tab appears.
+    # Keep the map-open boundary, not the timestamp of that transient old tab.
+    boundary=visit.get('open_since')
+    if boundary is None:boundary=visit.get('sample_at',visit.get('at',float('inf')))
     clicked=(button and button[0]==target and abs(button[2]-pointer.click_y)<image.shape[0]*.042
-             and pointer.click_at>visit.get('sample_at',visit['at']))
+             and pointer.click_at>boundary)
     continuing=same_input and source['floor']==target and visit.get('shared_camera')
-    if not (clicked or continuing):return None
+    gesture=bool(clicked or continuing)
 
     factor=min(1.,800/image.shape[1])
     small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
@@ -96,13 +105,33 @@ def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=No
         valid &= np.uint8(visible>=252)*255
     observed=geometry(small)&valid
     counts=[np.count_nonzero(observed==kind) for kind in (127,255)]
-    expected=cv2.warpAffine(matcher.template(floor)[1],matrix*factor,small.shape[1::-1],flags=cv2.INTER_NEAREST)
-    rates=[]
-    for kind,count in zip((127,255),counts):
-        if count<24:continue
-        near=cv2.dilate(np.uint8(expected==kind),np.ones((5,5),np.uint8))
-        rates.append(float(near[observed==kind].mean()))
-    if rates and min(rates)<.87:return None
-    hit=matcher.handoffs.result(floor,matrix,'三层共用坐标',min(rates,default=1.),False)
-    hit.update(search='shared_camera',shared_camera=True,camera_only=not rates,pointer=pointer)
-    return hit
+    if gesture:
+        expected=cv2.warpAffine(matcher.template(floor)[1],matrix*factor,small.shape[1::-1],flags=cv2.INTER_NEAREST)
+        rates=[]
+        for kind,count in zip((127,255),counts):
+            if count<24:continue
+            near=cv2.dilate(np.uint8(expected==kind),np.ones((5,5),np.uint8))
+            rates.append(float(near[observed==kind].mean()))
+        if not rates or min(rates)>=.87:
+            hit=matcher.handoffs.result(floor,matrix,'三层共用坐标',min(rates,default=1.),False)
+            hit.update(search='shared_camera',shared_camera=True,input_shared=True,
+                       camera_mode='floor_click' if clicked else 'continued',camera_only=not rates,pointer=pointer)
+            report.update(reason='accepted',mode=hit['camera_mode'])
+            return hit
+    if source['floor']==target:return reject('no_continuous_camera')
+    # A reopen has lost input continuity, but not the calibrated three-floor
+    # camera. Verify its predicted target directly before any device/library search.
+    if sum(counts)>=100:
+        site=matcher.handoffs.passage_at(source,target,visit.get('player_hd'))
+        hit=matcher.handoffs.paired_edges(small,observed,valid,floor,matrix,factor,visit,site)
+        if hit:
+            hit.update(search='shared_camera',shared_camera=True,camera_mode='projected_walls',camera_only=False)
+            report.update(reason='accepted',mode=hit['camera_mode'])
+            return hit
+        hit=matcher.paired_floor(image,visit,target,source['layout_id'],clear,zoom=zoom,fast_only=True)
+        if hit:
+            mode=hit['search']
+            hit.update(search='shared_camera',shared_camera=True,camera_mode=mode,camera_only=False)
+            report.update(reason='accepted',mode=mode)
+            return hit
+    return reject('target_pose_unverified' if sum(counts)>=100 else 'target_empty_without_continuity')

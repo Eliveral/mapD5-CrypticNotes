@@ -96,13 +96,13 @@ class LiveMatcher(FloorMatcher):
         if board and (not other or not other.get('device_pair')):return None
         return other
 
-    def shared_floor(self,image,visit,target,clear=None,zoom=None,pointer=None,continuous=False):
-        return shared_floor(self,image,map_area,visit,target,clear,zoom,pointer,continuous)
+    def shared_floor(self,image,visit,target,clear=None,zoom=None,pointer=None,continuous=False,audit=None):
+        return shared_floor(self,image,map_area,visit,target,clear,zoom,pointer,continuous,audit)
 
     def paired_b3(self,image,visit,locked,clear=None):
         return self.paired_floor(image,visit,'B3',locked,clear)
 
-    def paired_floor(self,image,visit,target,layout,clear=None,return_views=(),zoom=None,source_history=None):
+    def paired_floor(self,image,visit,target,layout,clear=None,return_views=(),zoom=None,source_history=None,fast_only=False):
         if not visit or not layout or not visit.get('unique_layout') or visit.get('provisional'):
             return None
         source=visit['floor'];level=source['floor']
@@ -169,6 +169,7 @@ class LiveMatcher(FloorMatcher):
                 hit=self.handoffs.whole_room_camera(small,geom,valid,floor,basis,factor,visit,
                                                      visit['player_hd']+offset,marker,passage is not None)
                 if hit:return hit
+        if fast_only:return None
         # Even away from the shared passage, a previously seen target room can
         # supply a camera. Verify both the measured screen motion and atlas walls.
         features=None

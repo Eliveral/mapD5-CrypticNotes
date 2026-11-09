@@ -31,6 +31,8 @@ class LiveController(base.LiveController):
         self.scale_hint = None
         self.view_cache = None
         self.floor_visits = {}
+        self.shared_view=None
+        self.map_open_since=None
         self.crossing_views={}
         self.observed_floor=self.transfer_from=None
         self.view_anchors={}
@@ -67,6 +69,7 @@ class LiveController(base.LiveController):
     def invalidate(self, clear_match=True):
         super().invalidate(clear_match)
         self.latest = self.pending = self.display = None
+        self.map_open_since=None
         # Only identity is cached; every new opening needs fresh registration.
 
     def start(self, continuous=True):
@@ -91,6 +94,8 @@ class LiveController(base.LiveController):
 
     def clear_visits(self):
         self.floor_visits.clear()
+        self.shared_view=None
+        self.map_open_since=None
         self.crossing_views={}
         self.observed_floor=self.transfer_from=None
         self.view_anchors={}
@@ -515,9 +520,14 @@ class LiveController(base.LiveController):
         shared_layout=self.round_lock.shared_layout if automatic else None
         pointer_observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
         pointer_ready=getattr(getattr(self,'hotkeys',None),'mouse_ready',False) is True
-        continuous=bool(self.display and self.overlay._visible and self.latest and self.latest['presence']['visible']
-                        and measured and self.display.get('label')==measured['floor']['id']
-                        and self.latest.get('selected_floor')==measured['selected_floor'])
+        common=getattr(self,'shared_view',None)
+        if (shared_layout and self.valid_visit(common,dict(game=game,roi=roi),lifetime)
+                and common['floor']['layout_id']==shared_layout):
+            measured=common
+        continuous=bool(measured and self.latest and self.latest['presence']['visible']
+                        and measured.get('open_since') is not None
+                        and measured.get('open_since')==getattr(self,'map_open_since',None))
+
 
         def grab():
             began = time.monotonic()
@@ -620,7 +630,11 @@ class LiveController(base.LiveController):
                 if (shared_layout and presence['visible'] and floor in ('B1','B2','B3')
                         and not manual and not self.warming and floor_limit in ('自动',floor)
                         and self.valid_visit(measured,sample,lifetime) and measured['floor']['layout_id']==shared_layout):
-                    result=self.matcher.shared_floor(frame,measured,floor,clear,zoom,pointer,continuous)
+                    audit={}
+                    result=self.matcher.shared_floor(frame,measured,floor,clear,zoom,pointer,continuous,audit)
+                    if floor!=measured['selected_floor']:
+                        sample['shared_attempt']=dict(source_floor=measured['selected_floor'],selected_floor=floor,
+                            continuous=continuous,mouse_ready=pointer_ready,**audit)
                     if result:sample['transfer_source']=measured
                 elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and not locked))
                                  and automatic and not manual and not self.warming and floor_limit in ('自动','B2')
@@ -773,7 +787,7 @@ class LiveController(base.LiveController):
                                       checked_at=checked,stationary=False,zoom=new_zoom,
                                       zoom_changed=bool(probe and zoom_changed(probe.zoom,new_zoom)))
                         sample.pop('view_features',None);sample.pop('player_update',None)
-                        if result.get('shared_camera') and current_pointer!=pointer:
+                        if result.get('input_shared') and current_pointer!=pointer:
                             result=None
                         sample['pointer']=current_pointer
                         if not check['visible'] or floor!=new_floor:
@@ -831,6 +845,10 @@ class LiveController(base.LiveController):
             self.due = 0
             return
         level=sample.get('selected_floor')
+        if sample['presence']['visible'] and (not self.latest or not self.latest['presence']['visible']):
+            self.map_open_since=sample['at']
+        if sample.get('shared_attempt'):
+            self.note('shared_floor_attempt',None,**sample['shared_attempt'])
         if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
             self.transfer_from=getattr(self,'observed_floor',None)
             sample['returned_to_entrance']=level=='B1' and self.transfer_from in ('B2','B3','B4')
@@ -898,6 +916,10 @@ class LiveController(base.LiveController):
                     visit['player_at']=sample['at']
                 visit['at']=sample['at']
                 if sample.get('pointer') is not None:visit['pointer']=sample['pointer']
+                shared=getattr(self,'shared_view',None)
+                if shared and shared['floor']['id']==visit['floor']['id']:
+                    for key in ('player_hd','player_at','at','pointer'):
+                        if key in visit:shared[key]=visit[key]
         if sample['presence']['visible'] and not sample.get('manual') and not sample.get('selected_floor') and self.display and self.display.get('selected_floor'):
             since=self.display.setdefault('uncertain_floor_since',now)
             if now-since<.16:
@@ -1241,7 +1263,7 @@ class LiveController(base.LiveController):
         if self.view_cache and self.view_cache.get('sample_at',0)>sample['at']:
             self.start_match()
             return
-        if result.get('shared_camera'):
+        if result.get('input_shared'):
             observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
             if observer is None or sample.get('pointer')!=observer.snapshot():
                 self.due=0.
@@ -1309,10 +1331,18 @@ class LiveController(base.LiveController):
                                    provisional=bool(result.get('provisional')),
                                    handoff_origin=result.get('handoff_origin'),
                                    alternatives=result.get('common_floors'))
+            self.view_cache['open_since']=getattr(self,'map_open_since',None)
             handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
             if handoffs and not sample.get('manual'):
                 self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])
                 if self.view_cache['player_hd'] is not None:self.view_cache['player_at']=sample['at']
+            if (isinstance(getattr(self,'matcher',None),LiveMatcher) and self.view_cache['unique_layout'] and not self.view_cache['provisional']
+                    and self.round_lock.shared_layout==result['floor']['layout_id']
+                    and sample['epoch']==self.generation):
+                shared=dict(self.view_cache)
+                shared['floor_matrices']={level:self.matcher.coordinates.predict(shared,level)[0]
+                                         for level in ('B1','B2','B3')}
+                self.shared_view=shared
             if sample.get('selected_floor') == result['floor']['floor']:
                 if self.view_cache['unique_layout'] and result.get('view_features') is not None:
                     self.view_cache['view_features']=result['view_features']
@@ -1370,7 +1400,7 @@ class LiveController(base.LiveController):
                                     epoch=self.generation, game=game, selected_floor=sample.get('selected_floor'),
                                     label=result['floor']['id'],summary=summary,provisional=result.get('provisional',False),
                                     search=result.get('search'),passage=result.get('passage'),probe=probe,
-                                    pointer=sample.get('pointer'),shared_camera=bool(result.get('shared_camera')),
+                                    pointer=sample.get('pointer'),shared_camera=bool(result.get('shared_camera')),input_shared=bool(result.get('input_shared')),camera_mode=result.get('camera_mode'),
                                     possible_layouts=alternatives,common_only=bool(result.get('common_floors')),
                                     matrix=result['matrix'].tolist(),shift_px=result.get('shift_px'))
                 self.show_display()
@@ -1415,7 +1445,7 @@ class LiveController(base.LiveController):
                 d.get('selected_floor') != current.get('selected_floor') or
                 base.foreground() != d['game'].hwnd or base.refresh_game(d['game']) != d['game']): return
         observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
-        if d.get('shared_camera') and (observer is None or d.get('pointer')!=observer.snapshot()):return
+        if d.get('input_shared') and (observer is None or d.get('pointer')!=observer.snapshot()):return
         label=d.get('label')
         if self.app.layout_limit.get()=='自动' and label:
             layout,level=label.rsplit('_',1)
@@ -1438,7 +1468,7 @@ class LiveController(base.LiveController):
             text=d.get('summary') or d['label']
             self.note('overlay_shown', f'地图已匹配 · {text}', floor_id=d['label'],
                       selected_floor=d.get('selected_floor'), capture_ms=current['capture_ms'],
-                      search=d.get('search'),passage=d.get('passage'),matrix=d.get('matrix'),shift_px=d.get('shift_px'),zoom=d.get('zoom'),
+                      search=d.get('search'),camera_mode=d.get('camera_mode'),passage=d.get('passage'),matrix=d.get('matrix'),shift_px=d.get('shift_px'),zoom=d.get('zoom'),
                       possible_layouts=d.get('possible_layouts'),common_only=d.get('common_only',False),
                       camera_ms=current.get('camera_ms'),draw_ms=current.get('draw_ms'),
                       first_for_open=first,frame_to_show_ms=round((time.monotonic()-current['at'])*1000),

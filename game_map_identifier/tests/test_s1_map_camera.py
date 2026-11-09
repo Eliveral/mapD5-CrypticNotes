@@ -29,4 +29,29 @@ class PointerTests(unittest.TestCase):
         s.landing.layout='s1_13';self.assertEqual(s.shared_layout,'s1_13')
         s.landing.waiting=True;self.assertIsNone(s.shared_layout)
 
+
+class CameraBoundaryTests(unittest.TestCase):
+    def test_source_frame_after_click_keeps_open_session_reference(self):
+        from unittest.mock import Mock,patch
+        import numpy as np
+        from src.s1_map_camera import shared_floor,PointerSnapshot
+        matcher=Mock()
+        floor=dict(id='s1_13_B3',layout_id='s1_13',floor='B3')
+        matcher.handoffs.floors={'s1_13_B3':floor}
+        matcher.coordinates.predict.return_value=(np.eye(2,3),None)
+        matcher.template.return_value=(None,np.zeros((240,400),np.uint8))
+        matcher.handoffs.result.side_effect=lambda floor,mat,*args:dict(floor=floor,matrix=mat)
+        pointer=PointerSnapshot(1,(0,0),2.,70.)
+        visit=dict(floor=dict(id='s1_13_B2',layout_id='s1_13',floor='B2'),
+                   matrix=np.eye(2,3),unique_layout=True,zoom=.7,at=2.2,sample_at=2.2,
+                   open_since=1.,pointer=pointer)
+        image=np.zeros((240,400,3),np.uint8)
+        area=lambda im:np.full(im.shape[:2],255,np.uint8)
+        with patch('src.s1_map_camera.selected_button',return_value=('B3',350,70)):
+            hit=shared_floor(matcher,image,area,visit,'B3',zoom=.7,pointer=pointer,continuous=True)
+            self.assertEqual(hit['camera_mode'],'floor_click')
+            self.assertTrue(hit['camera_only'])
+            self.assertIsNone(shared_floor(matcher,image,area,visit,'B3',zoom=.7,pointer=pointer,continuous=False))
+            self.assertIsNone(shared_floor(matcher,image,area,visit,'B3',zoom=.5,pointer=pointer,continuous=True))
+
 if __name__=='__main__':unittest.main()
