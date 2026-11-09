@@ -6,7 +6,7 @@ from .s1_view_motion import ViewFeatures,exclude_map_hud
 from .s1_entrance import turns
 
 
-def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None):
+def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None,poses=None):
     features=ViewFeatures(image,area,clear)
     g=features.geom
     _,_,stats,centers=cv2.connectedComponentsWithStats(np.uint8(g==127))
@@ -36,6 +36,7 @@ def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None):
         rows.append(hit)
     if not rows:return None,{}
     rows.sort(key=lambda h:-h['inliers'])
+    if poses is not None:poses.extend(rows)
     score={h['floor']['layout_id']:h['inliers'] for h in rows}
     best=rows[0];n=best['inliers']
     rival=max(best['rival'],rows[1]['inliers'] if len(rows)>1 else 0)
@@ -55,8 +56,8 @@ def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None):
     return best,score
 
 
-def check_partial_b2_edges(matcher,image,area,clear,wall,support):
-    """Independently locate visible directional edges throughout all B2 layouts.
+def check_partial_edges(matcher,image,area,clear,wall,support):
+    """Independently locate visible directional edges throughout all layouts of the observed floor.
     The corner fit supplies only the common art scale, never the translation.
     """
     winner=wall['floor']['layout_id']
@@ -89,7 +90,7 @@ def check_partial_b2_edges(matcher,image,area,clear,wall,support):
     native=np.linalg.solve(np.vstack((mat,[0,0,1])),corners.T)
     winner_score=rival_score=0.
     for floor in matcher.floors:
-        if floor['floor']!='B2':continue
+        if floor['floor']!=wall['floor']['floor']:continue
         other=floor['id'];ref=matcher.pose_check.hd_geometry(floor)
         scale=native_scale*factor/np.linalg.norm(matcher.coordinates.matrices[other][0][:2])
         for z in (scale*.95,scale,scale*1.05):

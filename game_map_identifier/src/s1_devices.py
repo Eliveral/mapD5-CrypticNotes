@@ -201,6 +201,11 @@ class FixedDevices:
                 elif not old[3] and (np.linalg.norm(pixel-old[1])>image.shape[0]*.025 or abs(scale/old[2]-1)>.04):
                     self.learned[key]=((old[0]+hd)/2,pixel,scale,True)
 
+    alchemy_offsets={
+        'control':((74,-4),(-74,4),(4,74),(-4,-74)),
+        'furnace':((5,16),(-5,-16),(-16,5),(16,-5)),
+    }
+
     def sites(self,floor,kind,labels):
         fid=floor['id'];sha=self.matcher.catalog.by_id['hd_'+fid[3:]]['sha256']
         fixed=MEASURED.get(sha,{}).get(kind)
@@ -224,8 +229,7 @@ class FixedDevices:
         if kind=='anvil' and 'supply' in anchors:
             return [np.add(anchors['supply'],v) for v in ((56,14),(-56,-14),(14,-56),(-14,56))],False
         if kind in ('control','furnace') and 'alchemy' in anchors:
-            directions=((74,-4),(-74,4),(4,74),(-4,-74)) if kind=='control' else ((5,16),(-5,-16),(-16,5),(16,-5))
-            return [np.add(anchors['alchemy'],v) for v in directions],False
+            return [np.add(anchors['alchemy'],v) for v in self.alchemy_offsets[kind]],False
         return [],False
 
     def room_pose(self,image,area,clear,floor,pixel,hd,scale_hint):
@@ -286,6 +290,35 @@ class FixedDevices:
             if all(np.linalg.norm(screen@[*site,1]-point)>tolerance for site in sites):
                 missed+=1
         return missed>=2
+
+    def unique_alchemy_pair(self,image,area,clear,models):
+        # Two adjacent icons cannot measure zoom on their own. Check their
+        # positions and common room orientation against competing wall poses.
+        if not models or models[0]['inliers']<18 or len(models[0]['cells'])<10:return False
+        winner=models[0]
+        if winner['consistency']<.94:return False
+        rival=max([winner['rival'],*(h['inliers'] for h in models[1:])])
+        if rival>.68*winner['inliers']:return False
+        seen=device_points(image,area,clear)
+        if not all(k in seen for k in self.alchemy_offsets):return False
+        pixels=np.asarray([seen[k][0] for k in self.alchemy_offsets])
+        distance=np.linalg.norm(pixels[0]-pixels[1])
+        tolerance=min(max(4.,image.shape[0]*.006),distance*.18)
+        if distance<14:return False
+        poses=[]
+        for row in models:
+            fid=row['floor']['id']
+            center=self.matcher.room_labels.points.get(fid,{}).get('alchemy')
+            reg=self.matcher.coordinates.matrices.get(fid)
+            if center is None or reg is None:return False
+            camera=row['matrix']@np.vstack((reg,[0,0,1]))
+            for directions in zip(*self.alchemy_offsets.values()):
+                predicted=np.c_[np.asarray(center)+directions,np.ones(2)]@camera.T
+                error=float(np.linalg.norm(predicted-pixels,axis=1).max())
+                poses.append((error,fid))
+        poses.sort()
+        return (poses[0][1]==winner['floor']['id'] and poses[0][0]<=tolerance
+                and all(error>2*tolerance for error,fid in poses if fid!=poses[0][1]))
 
     def agrees_with_pair(self,image,area,clear,hit):
         floor=hit['floor']

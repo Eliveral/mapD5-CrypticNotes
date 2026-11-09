@@ -1,4 +1,14 @@
 """The round's identity is independent of its current screen position."""
+def direct_pose(hit, paired=False):
+    """These methods measure the current view from an already verified position."""
+    method=hit.get('search','')
+    if method in ('camera_pan','camera_zoom','view_motion','view_zoom','b3_blackboard',
+                  'b1_b2_elevator','b2_recheck','b3_wall_review') or hit.get('device_kind'):
+        return True
+    return paired and method in ('paired_player','paired_player_adjust','paired_return',
+                                 'paired_return_adjust','paired_return_view','paired_room','paired_camera')
+
+
 class LandingReview:
     """Independent B3 evidence. This never votes on the round's B2 identity."""
     def __init__(self):
@@ -8,6 +18,14 @@ class LandingReview:
         self.pending=None
         self.cells=set()
         self.reference=None
+        self.at=-1.
+
+    def invalidate_before(self,stamp):
+        if self.at>=stamp or self.since>=stamp:return
+        self.layout=self.reference=self.pending=None
+        self.cells.clear()
+        self.waiting=True
+        self.since=stamp
         self.at=-1.
 
     def observe(self,hit,b2):
@@ -25,7 +43,7 @@ class LandingReview:
             self.pending=None;self.cells.clear();self.reference=hit
             return changed
         cells=set(hit['cells'])
-        if target!=self.pending:
+        if target!=self.pending and not hit.get('disjoint_proof'):
             self.pending=target;self.cells=cells
             return True
         if len(cells-self.cells)<3 and not hit.get('disjoint_proof'):return False
@@ -61,6 +79,18 @@ class RoundLock:
         self.elevator=None
         self.elevator_lock=False
         self.elevator_reviewed_at=-1.
+
+    def question_lower_floors(self,stamp):
+        # A return to an incompatible or unreadable entrance may be a new game
+        # in the same window. Keep the former B2 ID as a comparison candidate.
+        if self.b1_conflict or not (self.layout or self.proposal or self.landing.layout or self.landing.reference):
+            return False
+        self.b1_conflict=True
+        self.b2_since=max(self.b2_since,stamp)
+        self.proposal=self.elevator=self.region_layout=None
+        self.proposal_count=0;self.cells.clear();self.region_cameras.clear()
+        self.landing.invalidate_before(stamp)
+        return True
 
     def forget_elevator(self):
         if not self.elevator:return
@@ -115,6 +145,11 @@ class RoundLock:
             self.recheck_b2_after_landing=True
         return changed
 
+    @property
+    def elevator_only(self):
+        return bool(not self.layout and self.proposal and self.proposal.get('proof_kind')=='elevator'
+                    and not self.proposal.get('elevator_verified'))
+
     def permits_overlay(self, level, layout, candidates):
         if level=='B1':
             # The entrance matcher registers this floor independently. Multiple
@@ -132,7 +167,7 @@ class RoundLock:
         layout=reference['floor']['layout_id']
         from_elevator=reference.get('proof_kind')=='elevator'
         verified=bool(reference.get('elevator_verified'))
-        if from_elevator and not verified and (self.uncertain or self.challenger or self.recheck_b2_after_landing
+        if from_elevator and not verified and (self.b1_conflict or self.uncertain or self.challenger or self.recheck_b2_after_landing
                 or self.b2_arrival or (self.layout and self.layout!=layout)):
             return False
         followup=(stamp==self.last_capture and self.elevator and self.elevator['at']==stamp
@@ -147,6 +182,7 @@ class RoundLock:
         if reference.get('conflicting_models'):
             self.elevator=None
             changed=not self.uncertain
+            if changed and self.landing.layout:self.landing.invalidate_before(stamp)
             self.uncertain=True
             self.region_layout=None;self.region_cameras.clear()
             self.proposal=None;self.proposal_count=0;self.cells.clear()
@@ -155,6 +191,9 @@ class RoundLock:
         if from_elevator:self.elevator=reference
         elif self.elevator and self.elevator['floor']['layout_id']!=layout:self.elevator=None
         if self.layout==layout:
+            if self.b1_conflict and reference.get('proof_kind') in ('partial','elevator') and not (
+                    verified or reference.get('local_verified') or reference.get('region_verified')):
+                return False
             if self.challenger and (self.region_layout or self.uncertain) and reference.get('proof_kind')=='partial' and not reference.get('region_verified'):
                 # A weak glimpse of the old ID cannot erase a stronger local
                 # replacement. Hide both until the new pixels discriminate them.
@@ -168,6 +207,9 @@ class RoundLock:
             self.b1_conflict=False
             self.recheck_b2_after_landing=False
             self.reference=reference
+            if rechecked and self.landing.waiting and self.landing.at<0 and not self.landing.pending:
+                self.landing=LandingReview()
+                self.landing.since=stamp
             self.region_layout=None;self.region_cameras.clear()
             self.proposal=None;self.proposal_count=0;self.cells.clear()
             return disputed or previously_uncertain or rechecked
@@ -180,6 +222,8 @@ class RoundLock:
             return False
         self.uncertain=False
         if not self.proposal or layout!=self.proposal['floor']['layout_id']:
+            if self.layout and self.landing.layout and self.landing.layout!=layout:
+                self.landing.invalidate_before(stamp)
             self.proposal_since=stamp
             self.proposal_count=0;self.cells.clear()
             self.region_layout=None;self.region_cameras.clear()

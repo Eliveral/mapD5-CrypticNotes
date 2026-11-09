@@ -14,7 +14,7 @@ if __name__ == '__main__':
         from src.s1_view_motion import ViewFeatures,zoom_position,zoom_changed
         from src.s1_floor_transition import selected_floor
         from src.s1_visibility import MapVisibility
-        from src.s1_round_lock import RoundLock
+        from src.s1_round_lock import RoundLock,direct_pose
         cv2.setNumThreads(2)
         path=Path(sys.argv[sys.argv.index('--self-check-capture')+1])
         c=S1Catalog(map_root(project_root()))
@@ -85,6 +85,7 @@ if __name__ == '__main__':
                 and (lock.layout==certified or prior['floor']['floor']=='B3' or lock.region_layout==certified)):
             prior['zoom']=zoom_position(prior_image)
             landing_pose=matcher.paired_floor(frame,prior,selected,certified,zoom=zoom_position(frame))
+            if landing_pose and not direct_pose(landing_pose,paired=True):landing_pose=None
         if landing_pose is None and presence['visible'] and selected=='B3':
             base=None if lock.blocks_floor('B2') else lock.layout
             current=matcher.review_landing(frame,incumbent=lock.landing.layout or base,pending=lock.landing.pending)
@@ -129,6 +130,19 @@ if __name__ == '__main__':
                     r=proof
         else:
             r = matcher.locate_live(frame,lock.layout)
+        if (r['accepted'] and selected in ('B2','B3') and r is not landing_pose and not direct_pose(r)):
+            # A restricted fallback has not ruled out any other layout. Use the
+            # same independent floor review as the desktop before exporting it.
+            stamp=len(sys.argv)+1
+            if selected=='B3':
+                independent=matcher.review_landing(frame,incumbent=lock.preferred('B3'),pending=lock.landing.pending)
+                if independent:lock.observe_landing(dict(independent,at=stamp))
+            else:
+                independent=matcher.confirm_b2(frame,incumbent=lock.layout,entry=lock.b2_arrival)
+                if independent:lock.observe(dict(independent,at=stamp,unique_layout=True))
+            r=independent if independent and not independent.get('conflicting_models') else {'accepted':False}
+            target_layout=lock.preferred(selected)
+        if selected=='B2' and lock.elevator_only and not r.get('shared_elevator_only'):r={'accepted':False}
         if target_layout and r['accepted'] and (r['floor']['layout_id']!=target_layout or (lock.layout and r.get('provisional'))):
             r={'accepted':False}
         if r['accepted'] and not lock.permits_overlay(r['floor']['floor'],r['floor']['layout_id'],

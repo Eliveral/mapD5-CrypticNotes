@@ -16,7 +16,7 @@ from .s1_devices import FixedDevices,device_points
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
 from .s1_pose_check import PoseCheck
-from .s1_b2_review import compare_walls,check_partial_b2_edges
+from .s1_b2_review import compare_walls,check_partial_edges
 
 
 def map_area(image):
@@ -461,12 +461,14 @@ class LiveMatcher(FloorMatcher):
         generation=self.devices.generation
         full=self._locate_live(image,None,'B3',1280,1024,verification=True,clear=clear)
         full=full if self.broad_b2(full,image.shape) else None
-        hit,support=compare_walls(self,image,map_area,clear,full,level='B3',incumbent=incumbent)
+        poses=[]
+        hit,support=compare_walls(self,image,map_area,clear,full,level='B3',incumbent=incumbent,poses=poses)
         if hit and hit.get('conflicting_models'):return hit
         if not hit or (full and hit['floor']['id']!=full['floor']['id']):return None
         if incumbent not in (None,hit['floor']['layout_id']) and support.get(incumbent,0)>=.70*hit['inliers']:
             return None
-        if (full and pending==hit['floor']['layout_id'] and full['verified_rooms']>=6
+        challenger=hit['floor']['layout_id']!=incumbent or pending==hit['floor']['layout_id']
+        if (full and challenger and full['verified_rooms']>=6
                 and hit['inliers']>=20):
             # A stationary, well-explored view may not reveal new cells. Require
             # each of two disjoint regions to independently beat all 14 rivals.
@@ -485,12 +487,14 @@ class LiveMatcher(FloorMatcher):
                 if np.percentile(np.linalg.norm(delta,axis=0),75)>image.shape[0]*.007:break
                 verified.append(local['inliers'])
             hit['disjoint_proof']=len(verified)==2
-        if pending==hit['floor']['layout_id'] and not hit.get('disjoint_proof'):
+        if challenger and not hit.get('disjoint_proof'):
             if not hasattr(self,'room_labels'):self.room_labels=RoomLabels(self.catalog)
             # The unbiased full-library B3 wall search above must already agree.
             # Verify its transform against two independently calibrated symbols.
             icons=self.devices.agrees_with_pair(image,map_area,clear,hit)
-            if icons:hit['disjoint_proof']=True
+            if icons or self.devices.unique_alchemy_pair(image,map_area,clear,poses):hit['disjoint_proof']=True
+        if challenger and not hit.get('disjoint_proof') and hit['inliers']>=16:
+            hit['disjoint_proof']=check_partial_edges(self,image,map_area,clear,hit,support)
         if incumbent==hit['floor']['layout_id'] and pending in (None,incumbent):
             self.devices.observe(image,map_area,clear,hit,generation)
         return hit
@@ -539,7 +543,7 @@ class LiveMatcher(FloorMatcher):
         result['contradicts']=bool(incumbent and incumbent!=wall['floor']['layout_id'] and
                                    support.get(incumbent,0)<.70*wall['inliers'])
         if not full and wall['floor']['layout_id']!=local_layout and (result['contradicts'] or not incumbent):
-            result['local_verified']=check_partial_b2_edges(self,image,map_area,clear,wall,support)
+            result['local_verified']=check_partial_edges(self,image,map_area,clear,wall,support)
         return result
 
     @staticmethod

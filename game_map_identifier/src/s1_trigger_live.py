@@ -13,7 +13,7 @@ from .s1_elevator import cameras_agree
 from .s1_devices import device_points
 from .s1_layer_probe import LayerProbe
 from .s1_view_motion import ViewFeatures,zoom_position,zoom_changed,zoom_allows_scale
-from .s1_round_lock import RoundLock,LandingReview
+from .s1_round_lock import RoundLock,direct_pose
 
 
 class FloorChanged(Exception):
@@ -36,6 +36,8 @@ class LiveController(base.LiveController):
         self.view_anchors={}
         self.pose_task=None
         self.pose_due={}
+        self.review_requests={}
+        self.review_signatures={}
         self.pose_fixes={}
         self.b1_due=0.
         self.round_lock=RoundLock()
@@ -96,6 +98,8 @@ class LiveController(base.LiveController):
         self.landing_job=None;self.landing_due=0.
         self.queued_b2=self.queued_b3=None
         self.pose_due={}
+        self.review_requests={}
+        self.review_signatures={}
         self.pose_fixes={}
         self.b1_due=0.
         self.view_cache = self.floor_cache = self.scale_hint = self.cache_identity = None
@@ -223,7 +227,8 @@ class LiveController(base.LiveController):
         if self.proof_job:
             self.queued_b2=sample
             return
-        if sample['at']<self.proof_due:return
+        if sample['at']<self.proof_due and not sample.get('fresh_review'):return
+        self.review_signatures['B2']=sample['signature']
         state=self.round_lock
         token=object()
         self.proof_job=token
@@ -262,7 +267,8 @@ class LiveController(base.LiveController):
         if getattr(self,'landing_job',None):
             self.queued_b3=sample
             return
-        if sample['at']<getattr(self,'landing_due',0.):return
+        if sample['at']<getattr(self,'landing_due',0.) and not sample.get('fresh_review'):return
+        self.review_signatures['B3']=sample['signature']
         review=self.round_lock.landing
         token=object();self.landing_job=token
         incumbent=review.layout or (None if self.round_lock.blocks_floor('B2') else self.round_lock.layout)
@@ -315,7 +321,8 @@ class LiveController(base.LiveController):
         if ref['at']<review.since or ref['at']<=review.at:return
         if not self.round_lock.observe_landing(ref):
             if (not self.round_lock.blocks_floor('B3') and not ref.get('conflicting_models') and
-                    self.round_lock.preferred('B3')==ref['floor']['layout_id'] and self.needs_pose_update(ref)):
+                    self.round_lock.preferred('B3')==ref['floor']['layout_id'] and
+                    ('B3' in self.review_requests or self.needs_pose_update(ref))):
                 self.pose_fixes[ref['floor']['id']]=ref
                 self.due=0.
             return
@@ -378,8 +385,9 @@ class LiveController(base.LiveController):
         retained=next((v for v in (self.view_cache,self.floor_visits.get('B2')) if v
                        and v.get('floor',{}).get('id')==reference['floor']['id']
                        and self.valid_visit(v,reference,float('inf'))),None)
-        needs_pose=retained is None or self.needs_pose_update(reference,retained)
-        if not changed and (not needs_pose or state.uncertain or
+        needs_pose=(retained is None or (retained.get('shared_elevator_only') and not state.elevator_only)
+                    or self.needs_pose_update(reference,retained))
+        if not changed and (not (needs_pose or 'B2' in self.review_requests) or state.uncertain or
                 state.preferred('B2')!=reference['floor']['layout_id']):return
         self.app.round_status.set(state.status())
         if state.uncertain:
@@ -392,7 +400,7 @@ class LiveController(base.LiveController):
             # guesses from other floors, but retain verified same-layout poses.
             def expected_for(level):
                 return (state.landing.layout or identity) if level=='B3' else identity
-            wrong_cache=self.view_cache and (self.view_cache['floor']['layout_id']!=expected_for(self.view_cache['selected_floor']) or not self.view_cache.get('unique_layout'))
+            wrong_cache=self.view_cache and (self.view_cache['floor']['layout_id']!=expected_for(self.view_cache['selected_floor']) or (not self.view_cache.get('unique_layout') and not self.view_cache.get('shared_elevator_only')))
             wrong_display=self.display and not (self.display.get('label') or '').startswith(expected_for(self.display.get('selected_floor'))+'_')
             if wrong_cache or wrong_display or (old_b2 and old_b2!=identity):
                 self.invalidate();self.clear_visits()
@@ -402,7 +410,8 @@ class LiveController(base.LiveController):
             self.floor_visits={key:v for key,v in self.floor_visits.items() if permitted_floor(v['floor']['id']) and v.get('unique_layout')}
             self.view_anchors={key:v for key,v in self.view_anchors.items() if permitted_floor(key)}
             self.crossing_views={key:v for key,v in getattr(self,'crossing_views',{}).items() if permitted_floor(key)}
-            if reference['floor']['layout_id']==identity and 'view_features' in reference and (needs_pose or wrong_cache or wrong_display):
+            if (not state.elevator_only and reference['floor']['layout_id']==identity and 'view_features' in reference
+                    and (needs_pose or wrong_cache or wrong_display or 'B2' in self.review_requests)):
                 anchor=dict(reference)
                 mat=anchor['matrix']
                 anchor['result']=dict(floor=anchor['floor'],matrix=mat,scale=float(np.linalg.norm(mat[0,:2])),
@@ -502,6 +511,7 @@ class LiveController(base.LiveController):
             pair_identity=landing.layout
         trusted={'B2':local_b2 or locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
+        reviewed=dict(self.review_signatures)
 
         def grab():
             began = time.monotonic()
@@ -588,8 +598,11 @@ class LiveController(base.LiveController):
                         self.events.put(('sample',sample))
                         return
                 def attach_review():
-                    if not presence['visible'] or not ((floor=='B2' and verify) or (floor=='B3' and verify_b3)):
-                        return
+                    if not presence['visible'] or floor not in ('B2','B3'):return
+                    fresh=(floor in blocked and not self.warming and
+                           (floor not in reviewed or not same_view(sig,reviewed[floor])))
+                    if not (fresh or (verify if floor=='B2' else verify_b3)):return
+                    sample['fresh_review']=fresh
                     key='b2_pixels' if floor=='B2' else 'b3_pixels'
                     sample[key]=(probe.uncovered_frame(frame),probe.unpainted) if probe and clear is None else (frame,clear)
                 if presence['visible'] and not manual and floor not in ('B1','B2','B3'):
@@ -799,6 +812,7 @@ class LiveController(base.LiveController):
         level=sample.get('selected_floor')
         if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
             self.transfer_from=getattr(self,'observed_floor',None)
+            sample['returned_to_entrance']=level=='B1' and self.transfer_from in ('B2','B3','B4')
             if level=='B2' and self.transfer_from=='B1':self.proof_due=0.
             self.observed_floor=level
         if sample.get('round_opening') and self.round_lock.observe_opening(level,sample['at']):
@@ -838,6 +852,7 @@ class LiveController(base.LiveController):
                 self.latest=sample
                 self.display=self.pending=None
                 if self.overlay and self.overlay._visible:self.overlay.hide()
+                if sample.get('returned_to_entrance'):self.question_lower_floors(sample)
                 self.floor_visits.pop('B1',None)
                 self.round_lock.forget_elevator()
                 if self.view_cache and self.view_cache.get('selected_floor')=='B1':self.view_cache=None
@@ -1112,14 +1127,57 @@ class LiveController(base.LiveController):
         candidates=result.get('possible_layouts') or [result['floor']['layout_id']]
         elevator=self.round_lock.elevator
         if elevator and candidates!=[elevator['floor']['layout_id']]:self.round_lock.forget_elevator()
-        if not self.round_lock.layout:return
-        if self.round_lock.layout not in candidates and not self.round_lock.b1_conflict:
-            landing=self.round_lock.landing
-            if not (landing.layout or landing.pending or landing.waiting):
-                self.round_lock.landing=LandingReview()
-                self.round_lock.landing.since=sample['at']
-            self.round_lock.b1_conflict=True
-            self.app.round_status.set(self.round_lock.status())
+        prior=self.round_lock.layout or self.round_lock.landing.layout
+        if prior and (prior not in candidates or (sample.get('returned_to_entrance') and len(candidates)>1)):
+            self.question_lower_floors(sample)
+
+    def question_lower_floors(self,sample):
+        if not self.round_lock.question_lower_floors(sample['at']):return
+        self.clear_visits()
+        self.observed_floor='B1'
+        self.proof_due=self.landing_due=0.
+        self.proof_job=None
+        if isinstance(getattr(self,'matcher',None),LiveMatcher):self.matcher.devices.reset()
+        self.app.round_status.set(self.round_lock.status())
+        self.note('entrance_recheck','负一未能验证旧布局，等待当前楼层的固定结构。')
+
+    def has_current_pose(self,sample,hit):
+        level=sample.get('selected_floor')
+        if sample.get('manual') or level not in ('B2','B3') or self.app.layout_limit.get()!='自动':return True
+        if level=='B2' and self.round_lock.elevator_only:return bool(hit.get('shared_elevator_only'))
+        if direct_pose(hit,bool(sample.get('transfer_source'))) or (
+                hit.get('search')=='wall_realign' and (sample.get('applied_pose_fix') or sample.get('first_pose_fix'))):
+            return True
+        state=self.round_lock
+        refs=(state.landing.reference,) if level=='B3' else (state.proposal,state.reference)
+        for ref in refs:
+            if (ref and self.valid_visit(ref,sample,float('inf')) and ref['floor']['id']==hit['floor']['id']
+                    and ref.get('view_features') is not None and hit.get('view_features') is not None
+                    and same_view(ref['signature'],sample['signature']) and ref['view_features'].same_pixels(hit['view_features'])
+                    and cameras_agree(hit['matrix'],ref['matrix'],sample['roi'][2:])):
+                return True
+        return False
+
+    def request_current_pose(self,sample):
+        level=sample['selected_floor']
+        current=self.latest
+        if (sample['epoch']!=self.generation or not current or not current['presence']['visible']
+                or current.get('selected_floor')!=level):return
+        self.display=None
+        if self.overlay and self.overlay._visible:self.overlay.hide()
+        at=sample['at']
+        if at<self.review_requests.get(level,-1.):return
+        self.review_requests[level]=at+.4
+        key=level.lower()+'_pixels'
+        # An already painted sample can be used only with its uncovered pixels.
+        if key not in sample:
+            if sample.get('probing') and sample.get('clear_mask') is None:return
+            sample[key]=(sample['frame'],sample.get('clear_mask'))
+        if level=='B2':
+            self.proof_due=0.;self.begin_proof(sample)
+        else:
+            self.landing_due=0.;self.begin_landing(sample)
+        self.note('waiting_current_pose','固定墙线还不能区分布局，正在核对当前画面。',selected_floor=level)
 
     def allowed_result(self,result):
         level=result['floor']['floor']
@@ -1154,11 +1212,20 @@ class LiveController(base.LiveController):
         if self.camera_superseded(sample,self.latest):
             self.start_match()
             return
+        if (self.app.layout_limit.get()=='自动' and sample.get('selected_floor') in ('B2','B3')
+                and sample['at']<(self.round_lock.b2_since if sample['selected_floor']=='B2' else self.round_lock.landing.since)):
+            self.start_match()
+            return
         if self.view_cache and self.view_cache.get('sample_at',0)>sample['at']:
             self.start_match()
             return
         if result.get('accepted') and self.device_conflict(sample,result['floor'],result['matrix']):return
+        if result['accepted'] and not self.has_current_pose(sample,result):
+            self.request_current_pose(sample)
+            self.start_match()
+            return
         if result['accepted']:
+            self.review_requests.pop(sample.get('selected_floor'),None)
             if self.latest and self.latest['presence']['visible']:self.check_b1_conflict(sample,result)
             fix=sample.get('applied_pose_fix')
             fid=result['floor']['id']
@@ -1187,6 +1254,7 @@ class LiveController(base.LiveController):
                     summary='负一共通区域 · 候选 '+' / '.join(a[3:] for a in alternatives)
             else:self.app.round_status.set(self.round_lock.status())
             if result.get('passage'):summary=f"{result['floor']['floor']} · {result['passage']} · 继承定位"
+            if result.get('shared_elevator_only'):summary='负二 · 升降梯共通区域'
             if (self.app.layout_limit.get()=='自动' and result['floor']['floor']=='B3' and
                     self.round_lock.landing.layout==result['floor']['layout_id']):
                 summary='负三独立核对 · 布局 '+self.round_lock.landing.layout[3:]
@@ -1208,7 +1276,8 @@ class LiveController(base.LiveController):
                                    selected_floor=sample.get('selected_floor'), label=result['floor']['id'],summary=summary,
                                    zoom=sample.get('zoom'),signature=sample['signature'], rendered=rendered, floor=result['floor'], probe=probe,
                                    matrix=np.array(result['matrix'],copy=True),
-                                   unique_layout=len(alternatives)==1,possible_layouts=alternatives,
+                                   unique_layout=len(alternatives)==1 and not result.get('shared_elevator_only'),
+                                   shared_elevator_only=bool(result.get('shared_elevator_only')),possible_layouts=alternatives,
                                    provisional=bool(result.get('provisional')),
                                    handoff_origin=result.get('handoff_origin'),
                                    alternatives=result.get('common_floors'))
@@ -1239,7 +1308,7 @@ class LiveController(base.LiveController):
                         self.crossing_views[key]=snapshot
                     self.transfer_from=None
                 features=result.get('view_features')
-                if features is not None and len(alternatives)==1 and not result.get('provisional'):
+                if features is not None and self.view_cache['unique_layout'] and not result.get('provisional'):
                     fid=result['floor']['id']
                     anchor={k:self.view_cache[k] for k in ('game','revision','roi','at','matrix','handoff_origin')}
                     anchor['view_features']=features

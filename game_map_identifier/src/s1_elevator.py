@@ -181,4 +181,19 @@ class ElevatorMatcher:
         result.update(search='b1_b2_elevator',segmentation='elevator',reason='已对齐负二升降梯',rival=float(rival),
                       elevator_verified=bool(not island and strength>.70 and strength-rival>=.10 and beyond>=18),
                       texture=float(texture))
+        if not result['elevator_verified']:
+            # Register every B2 at the measured shaft. The normal consensus
+            # renderer keeps only geometry shared by every possible neighbour.
+            common=[]
+            for other in m.floors:
+                if other['floor']!='B2':continue
+                layout=other['layout_id']
+                links=m.coordinates.passages.get((layout,'B1','B2'),())
+                reg=m.coordinates.matrices.get(other['id'])
+                if len(links)!=1 or reg is None:return None
+                aligned=native.copy()
+                aligned[:,2]=pixel-np.asarray(links[0][2])*scale
+                camera=aligned@np.linalg.inv(np.vstack((reg,[0,0,1])))
+                common.append(dict(floor=other,matrix=camera))
+            result.update(shared_elevator_only=True,common_floors=common)
         return result
