@@ -79,7 +79,18 @@ def board_pose(matcher,image,area,floor,station,clear=None,scale_hint=None):
     if reg is None:return None
     art=matcher.catalog.by_id.get('hd_'+floor['layout_id'][3:]+'_B3',{})
     orientation=ORIENTATIONS.get(art.get('sha256'))
-    fixed=orientation is not None and scale_hint is not None
+    sites=[np.add(station,np.array([125,31])*sign) for sign in ((orientation,) if orientation else (-1,1))]
+    hit=symbol_pose(matcher,image,area,floor,point,sites,orientation is not None,clear,scale_hint,board=True)
+    if hit:
+        hit.update(search='b3_blackboard',segmentation='station_board',passage='预言黑板',
+                   reason='黑板与当前负三墙线已对齐')
+    return hit
+
+
+def symbol_pose(matcher,image,area,floor,point,sites,measured,clear,scale_hint,board=False):
+    reg=matcher.coordinates.matrices.get(floor['id'])
+    if reg is None or not sites:return None
+    fixed=measured and scale_hint is not None
     if scale_hint is not None and (not np.isfinite(scale_hint) or scale_hint<=0):return None
     factor=min(1.,950/image.shape[1])
     small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
@@ -106,20 +117,32 @@ def board_pose(matcher,image,area,floor,station,clear=None,scale_hint=None):
         points.append((fields[i],delta[::max(1,len(ix)//65)],axis));axes.add(axis)
     if len(axes)<2 and not fixed:return None
     near=geom[max(0,y-7):y+8,max(0,x-7):x+8]
-    if near.size<160 or np.mean(near==127)<.62:return None
+    if near.size<160:return None
+    if board:
+        if np.mean(near==127)<.62:return None
+    elif np.mean(near>0)<.48 or np.mean(near==127)<.15:return None
     occupied=np.column_stack(np.nonzero(crop[::3,::3])).astype(float)
     if not len(occupied):return None
     oy,ox=(occupied*3).astype(int).T
     expected=crop[oy,ox]
     positions=np.stack((ox+left,oy+top),axis=1)-point*factor
+    if not board:
+        outside=np.max(np.abs(positions),axis=1)>max(3.,image.shape[0]*.0095*factor)
+        positions,expected=positions[outside],expected[outside]
+        if len(positions)<7:return None
     model=matcher.pose_check.hd_geometry(floor)
+    if not board:
+        tolerant={value:cv2.dilate(np.uint8(model==value),np.ones((5,5),np.uint8)) for value in (127,255)}
 
     def evaluate(anchor,scale):
         def indices(delta):
             px,py=np.rint(anchor+delta/(scale*factor)).astype(int).T
             return np.clip(py,0,model.shape[0]-1),np.clip(px,0,model.shape[1]-1)
         iy,ix=indices(positions)
-        agreement=np.mean(model[iy,ix]==expected)
+        if board:agreement=np.mean(model[iy,ix]==expected)
+        else:
+            inside=(tolerant[127][iy,ix]&(expected==127))|(tolerant[255][iy,ix]&(expected==255))
+            agreement=np.mean(inside)
         errors=[dist[indices(delta)]*(scale*factor) for dist,delta,_ in points]
         rates=[np.mean(d<=2.3) for d in errors]
         if not errors:return float(agreement),1.,agreement
@@ -133,8 +156,8 @@ def board_pose(matcher,image,area,floor,station,clear=None,scale_hint=None):
     trials=np.geomspace(.18*unit,2.7*unit,47) if scale_hint is None else [scale_hint]
     trials=list(trials)
     candidates=[]
-    for sign in (orientation,) if orientation else (-1,1):
-        anchor=np.asarray(reg)@[*np.add(station,np.array([125,31])*sign),1]
+    for hd in sites:
+        anchor=np.asarray(reg)@[*hd,1]
         ranked=[(evaluate(anchor,z),z) for z in trials]
         quality,scale=max(ranked)
         if scale_hint is None:
@@ -147,13 +170,11 @@ def board_pose(matcher,image,area,floor,station,clear=None,scale_hint=None):
         # A little explored island has artificial fog edges. A measured board
         # orientation and unchanged zoom already determine its camera; check
         # that the entire visible patch fits, even with only one real wall.
-        island=coverage>=.98 and np.ptp(positions,axis=0).max()<small.shape[0]*.17
-        if coverage<.94 or (not island and (score<.64 or weakest<.32)):return None
+        island=coverage>=(.98 if board else .92) and np.ptp(positions,axis=0).max()<small.shape[0]*.17
+        if coverage<(.94 if board else .92) or (not island and (score<.64 or weakest<.32)):return None
     elif score<.72 or weakest<.65 or coverage<.90:return None
     if len(candidates)>1 and candidates[1][0][0]>score-.08:return None
     if scale_hint is None and any(abs(z/scale-1)>.15 and q[0]>score-.045 for q,z in ranked):return None
     mat=np.eye(2,3)*scale
     mat[:,2]=point-scale*anchor
-    hit=matcher.handoffs.result(floor,mat,'预言黑板',score,False)
-    hit.update(search='b3_blackboard',segmentation='station_board',reason='黑板与当前负三墙线已对齐')
-    return hit
+    return matcher.handoffs.result(floor,mat,'固定图标',score,False)

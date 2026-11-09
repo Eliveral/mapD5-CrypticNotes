@@ -12,6 +12,7 @@ from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
 from .s1_elevator import ElevatorMatcher
 from .s1_blackboard import board_pose
+from .s1_devices import FixedDevices,device_points
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
 from .s1_pose_check import PoseCheck
@@ -51,6 +52,7 @@ class LiveMatcher(FloorMatcher):
         self.corridors = CorridorMatcher(self)
         self.original = OriginalMap(self)
         self.elevators=ElevatorMatcher(self)
+        self.devices=FixedDevices(self)
 
     def warmup(self):
         super().warmup()
@@ -68,20 +70,30 @@ class LiveMatcher(FloorMatcher):
                 for _,point,_ in sites:self.handoffs.site(floor,point)
 
     def locate_board(self,image,layout,clear=None,visit=None,zoom=None):
-        floor=self.handoffs.floors.get(layout+'_B3') if layout else None
+        return self.locate_device(image,layout,'B3',clear,visit,zoom,board_only=True)
+
+    def locate_device(self,image,layout,level,clear=None,visit=None,zoom=None,board_only=False,points=None):
+        floor=self.handoffs.floors.get(layout+'_'+level) if layout and level in ('B2','B3') else None
         if not floor:return None
         if not hasattr(self,'room_labels'):self.room_labels=RoomLabels(self.catalog)
-        station=self.room_labels.points.get(floor['id'],{}).get('supply')
-        if station is None:return None
         scale=None
         if (visit and visit['floor']['layout_id']==layout and visit.get('unique_layout')
                 and not visit.get('provisional') and zoom is not None):
             old_zoom=visit.get('zoom')
             if old_zoom is None and visit.get('view_features'):old_zoom=visit['view_features'].zoom
             if old_zoom is not None and not zoom_changed(old_zoom,zoom):
-                mat,_=self.coordinates.predict(visit,'B3')
+                mat,_=self.coordinates.predict(visit,level)
                 if mat is not None:scale=float(np.linalg.norm(mat[0,:2]))
-        return board_pose(self,image,map_area,floor,station,clear,scale)
+        board=None
+        if level=='B3':
+            station=self.room_labels.points.get(floor['id'],{}).get('supply')
+            if station is not None:board=board_pose(self,image,map_area,floor,station,clear,scale)
+        if board_only:return board
+        seen=device_points(image,map_area,clear) if points is None else points
+        if board and self.devices.agrees_with_visible(image,floor,self.room_labels,board['matrix'],seen):return board
+        other=self.devices.locate(image,map_area,floor,self.room_labels,clear,scale,seen)
+        if board and (not other or not other.get('device_pair')):return None
+        return other
 
     def paired_b3(self,image,visit,locked,clear=None):
         return self.paired_floor(image,visit,'B3',locked,clear)
@@ -357,8 +369,8 @@ class LiveMatcher(FloorMatcher):
     def _locate_selected(self, image, layout, floor_name, scale_hint=None, visit=None):
         if floor_name not in ('B1', 'B2', 'B3'):
             return dict(accepted=False, candidates=[], reason=f'图库未收录 {floor_name}。')
-        if floor_name=='B3' and layout:
-            hit=self.locate_board(image,layout,visit=visit,zoom=zoom_position(image))
+        if floor_name in ('B2','B3') and layout:
+            hit=self.locate_device(image,layout,floor_name,visit=visit,zoom=zoom_position(image))
             if hit:return hit
         if floor_name=='B1' and not layout:
             return self.review_b1(image) or dict(accepted=False,candidates=[],reason='当前负一缺少可独立定位的固定墙线。')
@@ -446,6 +458,7 @@ class LiveMatcher(FloorMatcher):
     def review_landing(self,image,clear=None,incumbent=None,pending=None):
         # A B2 passage and a previous B3 visit are position hints only. Compare
         # all B3 images on real unpainted pixels, without supplying their IDs.
+        generation=self.devices.generation
         full=self._locate_live(image,None,'B3',1280,1024,verification=True,clear=clear)
         full=full if self.broad_b2(full,image.shape) else None
         hit,support=compare_walls(self,image,map_area,clear,full,level='B3',incumbent=incumbent)
@@ -472,9 +485,24 @@ class LiveMatcher(FloorMatcher):
                 if np.percentile(np.linalg.norm(delta,axis=0),75)>image.shape[0]*.007:break
                 verified.append(local['inliers'])
             hit['disjoint_proof']=len(verified)==2
+        if pending==hit['floor']['layout_id'] and not hit.get('disjoint_proof'):
+            if not hasattr(self,'room_labels'):self.room_labels=RoomLabels(self.catalog)
+            # The unbiased full-library B3 wall search above must already agree.
+            # Verify its transform against two independently calibrated symbols.
+            icons=self.devices.agrees_with_pair(image,map_area,clear,hit)
+            if icons:hit['disjoint_proof']=True
+        if incumbent==hit['floor']['layout_id'] and pending in (None,incumbent):
+            self.devices.observe(image,map_area,clear,hit,generation)
         return hit
 
     def confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None):
+        generation=self.devices.generation
+        hit=self._confirm_b2(image,clear,incumbent,entry,local_layout)
+        if hit and incumbent==hit['floor']['layout_id'] and (hit.get('proof_kind')=='full' or hit.get('local_verified')):
+            self.devices.observe(image,map_area,clear,hit,generation)
+        return hit
+
+    def _confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.
         hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)

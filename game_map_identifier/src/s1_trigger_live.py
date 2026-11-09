@@ -10,6 +10,7 @@ from . import s1_live as base
 from .s1_live_match import LiveMatcher, signature, same_view, map_area
 from .s1_floor_transition import selected_floor
 from .s1_elevator import cameras_agree
+from .s1_devices import device_points
 from .s1_layer_probe import LayerProbe
 from .s1_view_motion import ViewFeatures,zoom_position,zoom_changed,zoom_allows_scale
 from .s1_round_lock import RoundLock,LandingReview
@@ -105,6 +106,7 @@ class LiveController(base.LiveController):
                     visit['game'] == sample['game'] and visit['roi'] == sample['roi'])
 
     def new_round(self):
+        if isinstance(getattr(self,'matcher',None),LiveMatcher):self.matcher.devices.reset()
         self.session_revision+=1
         self.invalidate()
         self.clear_visits()
@@ -617,14 +619,16 @@ class LiveController(base.LiveController):
                     moving=not stationary if probe else not same_view(sig,last['signature'])
                     origin=last.get('handoff_origin') if moving or last.get('provisional') else None
                 from_level=observed if observed!=floor else transfer_from
-                # On entry/reopen the board directly anchors the current B3.
-                # Regular same-floor tracking remains cheaper on a moving view.
-                if (floor=='B3' and trusted['B3'] and presence['visible'] and not manual and not self.warming
-                        and floor_limit in ('自动','B3') and (changing or (not probe and not self.display))):
+                # Use registered map fixtures when the floor is known. The
+                # same-floor tracking and wall searches below remain available.
+                if (not result and floor in ('B2','B3') and trusted[floor] and presence['visible']
+                        and not manual and not self.warming and floor_limit in ('自动',floor)
+                        and (changing or (not probe and not self.display))):
                     source=next((v for v in (last,b3_visit,known_visit,known_b2)
-                                 if v and v['floor']['layout_id']==trusted['B3'] and self.valid_visit(v,sample,lifetime)
+                                 if v and v['floor']['layout_id']==trusted[floor] and self.valid_visit(v,sample,lifetime)
                                  and v.get('unique_layout') and not v.get('provisional')),None)
-                    result=self.matcher.locate_board(frame,trusted['B3'],clear,source,zoom)
+                    sample['device_points']=device_points(frame,map_area,clear)
+                    result=self.matcher.locate_device(frame,trusted[floor],floor,clear,source,zoom,points=sample['device_points'])
                 if (not result and pair_identity and {from_level,floor}=={'B2','B3'} and presence['visible']
                         and not manual and not self.warming and floor_limit in ('自动',floor)
                         and wanted in (None,pair_identity) and (from_level=='B3' or locked==pair_identity or local_b2==pair_identity)):
@@ -749,7 +753,9 @@ class LiveController(base.LiveController):
                             previous_features=result['view_features']
                             changed=(zoom_changed(zoom,new_zoom) or not same_view(sig,new_sig)
                                      or not previous_features.same_pixels(now_features))
-                            if changed and result.get('search')=='b1_b2_elevator':
+                            if changed:
+                                sample.pop('device_points',None)
+                            if changed and (result.get('search')=='b1_b2_elevator' or result.get('device_kind')):
                                 result=None
                                 sample.pop('b2_pixels',None)
                             elif changed:
@@ -952,6 +958,27 @@ class LiveController(base.LiveController):
             return False
         return view['probe'].stationary(sample['frame'],0.)
 
+    def device_conflict(self,sample,floor,mat):
+        seen=sample.get('device_points')
+        if (not seen or len(seen)<2 or sample.get('manual') or sample['epoch']!=self.generation
+                or self.app.layout_limit.get()!='自动' or not sample['presence']['visible']
+                or not self.latest or not self.latest['presence']['visible'] or self.latest.get('selected_floor')!=floor['floor']):return False
+        if not self.matcher.devices.contradicts(floor,self.matcher.room_labels,mat,seen,sample['frame'].shape[0]):
+            return False
+        level=floor['floor'];fid=floor['id']
+        self.display=self.pending=None
+        if self.overlay and self.overlay._visible:self.overlay.hide()
+        if self.view_cache and self.view_cache['floor']['id']==fid:self.view_cache=None
+        self.floor_visits.pop(level,None);self.view_anchors.pop(fid,None);self.pose_fixes.pop(fid,None)
+        self.due=0.
+        if level=='B3':
+            self.round_lock.landing.waiting=True;self.landing_due=0.
+            sample['b3_pixels']=(sample['frame'],sample.get('clear_mask'));self.begin_landing(sample)
+        elif level=='B2':
+            self.proof_due=0.;sample['b2_pixels']=(sample['frame'],sample.get('clear_mask'));self.begin_proof(sample)
+        self.note('device_pose_conflict','当前墙线位置与多个机关不符，重新核对本层。',selected_floor=level)
+        return True
+
     def reuse_view(self, sample):
         cached = self.floor_visits.get(sample.get('selected_floor'), self.view_cache)
         if cached and not self.allowed_result(dict(floor=cached['floor'],possible_layouts=cached.get('possible_layouts'))):
@@ -965,6 +992,7 @@ class LiveController(base.LiveController):
                 sample['game'] != cached['game'] or sample['roi'] != cached['roi'] or
                 not same_view(sample['signature'], cached['signature'])): return False
         if not self.matches_clean_view(cached,sample):return False
+        if self.device_conflict(sample,cached['floor'],cached['matrix']):return False
         self.display = dict(signature=sample['signature'], rendered=cached['rendered'],
                             zoom=sample.get('zoom'),roi=sample['roi'], epoch=self.generation, game=sample['game'],
                             selected_floor=sample.get('selected_floor'), label=cached.get('label'),
@@ -1129,6 +1157,7 @@ class LiveController(base.LiveController):
         if self.view_cache and self.view_cache.get('sample_at',0)>sample['at']:
             self.start_match()
             return
+        if result.get('accepted') and self.device_conflict(sample,result['floor'],result['matrix']):return
         if result['accepted']:
             if self.latest and self.latest['presence']['visible']:self.check_b1_conflict(sample,result)
             fix=sample.get('applied_pose_fix')

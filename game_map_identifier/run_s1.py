@@ -76,9 +76,9 @@ if __name__ == '__main__':
                     landing_pose=lift
             prior=None  # An unresolved B1 never seeds an unverified fallback on B2.
         certified=lock.layout or lock.landing.layout
-        if certified and selected=='B3' and presence['visible'] and not lock.blocks_floor('B3'):
+        if landing_pose is None and certified and selected in ('B2','B3') and presence['visible'] and not lock.blocks_floor(selected):
             if prior:prior['zoom']=zoom_position(prior_image)
-            landing_pose=matcher.locate_board(frame,lock.preferred('B3'),visit=prior,zoom=zoom_position(frame))
+            landing_pose=matcher.locate_device(frame,lock.preferred(selected),selected,visit=prior,zoom=zoom_position(frame))
         if (landing_pose is None and prior and presence['visible'] and {selected,prior['floor']['floor']}=={'B2','B3'}
                 and certified and not lock.blocks_floor(selected) and not lock.blocks_floor(prior['floor']['floor'])
                 and lock.preferred(selected) in (None,certified) and lock.preferred(prior['floor']['floor'])==certified
