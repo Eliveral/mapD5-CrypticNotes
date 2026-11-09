@@ -58,6 +58,17 @@ class RoundLock:
         self.opening_floor=None
         self.region_layout=None
         self.region_cameras=[]
+        self.elevator=None
+        self.elevator_lock=False
+        self.elevator_reviewed_at=-1.
+
+    def forget_elevator(self):
+        if not self.elevator:return
+        self.elevator=None
+        if self.proposal and self.proposal.get('proof_kind')=='elevator':
+            self.proposal=None;self.proposal_count=0;self.cells.clear()
+            self.region_layout=None;self.region_cameras.clear()
+            if not self.layout:self.candidate=None;self.count=0
 
     def observe_opening(self, level, at):
         """Only the first readable floor of a round is its random starting point."""
@@ -118,16 +129,31 @@ class RoundLock:
         if reference['floor']['floor']!='B2' or not reference.get('unique_layout') or reference.get('provisional'):
             return False
         stamp=reference['at']
-        if stamp<=self.last_capture or stamp<self.b2_since:return False
+        layout=reference['floor']['layout_id']
+        from_elevator=reference.get('proof_kind')=='elevator'
+        verified=bool(reference.get('elevator_verified'))
+        if from_elevator and not verified and (self.uncertain or self.challenger or self.recheck_b2_after_landing
+                or self.b2_arrival or (self.layout and self.layout!=layout)):
+            return False
+        followup=(stamp==self.last_capture and self.elevator and self.elevator['at']==stamp
+                  and stamp>self.elevator_reviewed_at and reference.get('proof_kind')!='elevator')
+        if stamp<self.b2_since or (stamp<=self.last_capture and not followup):return False
+        if followup:
+            self.elevator_reviewed_at=stamp
+            against_lift=reference['floor']['layout_id']!=self.elevator['floor']['layout_id']
+            if not (reference.get('conflicting_models') or reference.get('elevator_verified') or against_lift):
+                return False
         self.last_capture=stamp
         if reference.get('conflicting_models'):
+            self.elevator=None
             changed=not self.uncertain
             self.uncertain=True
             self.region_layout=None;self.region_cameras.clear()
             self.proposal=None;self.proposal_count=0;self.cells.clear()
             return changed
         previously_uncertain=self.uncertain
-        layout=reference['floor']['layout_id']
+        if from_elevator:self.elevator=reference
+        elif self.elevator and self.elevator['floor']['layout_id']!=layout:self.elevator=None
         if self.layout==layout:
             if self.challenger and (self.region_layout or self.uncertain) and reference.get('proof_kind')=='partial' and not reference.get('region_verified'):
                 # A weak glimpse of the old ID cannot erase a stronger local
@@ -169,14 +195,17 @@ class RoundLock:
         if cold_full or reference.get('local_verified') or (strong_region and (not self.layout or corroborated_regions)):
             self.region_layout=layout
         corroborated=(self.region_layout==layout and not self.layout and reference.get('camera_support'))
-        if reference.get('proof_kind')=='partial' and self.proposal_count and len(novel)<3 and not corroborated:
+        if (reference.get('proof_kind') in ('partial','elevator') and self.proposal_count
+                and len(novel)<3 and not corroborated and not verified):
             return old_region!=self.region_layout
         if self.region_layout==layout and reference.get('matrix') is not None:
             self.region_cameras.append(reference['matrix'].copy())
         self.proposal=reference
-        self.cells.update(cells);self.proposal_count+=1
+        self.cells.update(cells)
+        if not (followup and verified and self.proposal_count):
+            self.proposal_count+=1
         if not self.layout:self.candidate,self.count=layout,self.proposal_count
-        if self.proposal_count==self.required:
+        if self.proposal_count==self.required or verified:
             landing=self.landing
             inherited_old=(self.layout and self.layout!=layout and landing.reference
                            and landing.reference['floor']['layout_id']!=layout)
@@ -195,12 +224,15 @@ class RoundLock:
             self.b2_arrival=False
             self.b1_conflict=False
             self.reference=reference
-            self.candidate,self.count=layout,self.required
+            self.elevator_lock=verified
+            self.candidate,self.count=layout,self.proposal_count
             self.proposal=None;self.proposal_count=0;self.cells.clear()
         return True
 
     def status(self):
         if self.uncertain:return '负二的固定结构比对有冲突 · 等待更多墙线'
+        if self.region_layout and self.elevator and self.elevator['floor']['layout_id']==self.region_layout:
+            return f'负二升降梯已对齐 · 布局 {self.region_layout[3:]} · 等待周围墙线确认'
         if self.region_layout:return f'负二已定位 {self.region_layout[3:]} · 整局核对 {self.proposal_count}/{self.required}'
         if self.challenger:return f'负二与旧布局 {self.layout[3:]} 冲突 · 复核布局 {self.challenger[3:]}（{self.proposal_count}/{self.required}）'
         if self.landing.layout and self.recheck_b2_after_landing:
@@ -212,7 +244,8 @@ class RoundLock:
             b2=self.layout[3:] if self.layout else '未确认'
             return f'负二 {b2} · 负三独立确认 {self.landing.layout[3:]}'
         if self.b2_arrival:return f'负二落点重新核对 · {self.proposal_count}/{self.required}'
-        if self.layout:return '本局已锁定 · 布局 '+self.layout[3:]+'（负二已确认 3 次）'
+        if self.layout and self.elevator_lock:return f'本局已锁定 · 布局 {self.layout[3:]}（升降梯与负二墙线已核对）'
+        if self.layout:return f'本局已锁定 · 布局 {self.layout[3:]}（负二已确认 3 次）'
         if self.candidate:return f'负二核对 {self.count}/{self.required} · 布局 {self.candidate[3:]}'
         return '等待负二确认本局布局'
 

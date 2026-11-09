@@ -56,6 +56,25 @@ if __name__ == '__main__':
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         landing_pose=None
+        if (prior and prior['floor']['floor']=='B1' and selected=='B2' and presence['visible']
+                and lock.opening_floor not in ('B2','B3','B4')):
+            prior['zoom']=zoom_position(prior_image)
+            lift=matcher.elevators.locate(frame,map_area,prior,zoom=zoom_position(frame))
+            if lift:
+                from src.s1_elevator import cameras_agree
+                stamp=len(sys.argv)-.5
+                lock.observe(dict(lift,at=stamp,unique_layout=True,proof_kind='elevator',
+                                  local_verified=True,contradicts=lift['elevator_verified']))
+                if not lift['elevator_verified']:
+                    independent=matcher.confirm_b2(frame,incumbent=lock.layout,local_layout=lock.region_layout)
+                    if independent:
+                        eligible=independent.get('proof_kind')=='full' or independent.get('region_verified') or independent.get('local_verified')
+                        same=independent['floor']['id']==lift['floor']['id']
+                        checked=eligible and same and cameras_agree(lift['matrix'],independent['matrix'],frame.shape[1::-1])
+                        lock.observe(dict(independent,at=stamp,unique_layout=True,elevator_verified=checked))
+                if lock.permits_overlay('B2',lift['floor']['layout_id'],lift['possible_layouts']):
+                    landing_pose=lift
+            prior=None  # An unresolved B1 never seeds an unverified fallback on B2.
         certified=lock.layout or lock.landing.layout
         if certified and selected=='B3' and presence['visible'] and not lock.blocks_floor('B3'):
             if prior:prior['zoom']=zoom_position(prior_image)

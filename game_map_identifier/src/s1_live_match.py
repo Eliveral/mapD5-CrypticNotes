@@ -10,6 +10,7 @@ from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
 from .s1_entrance import EntranceMatcher
 from .s1_station import StationMatcher
+from .s1_elevator import ElevatorMatcher
 from .s1_blackboard import board_pose
 from .s1_handoff import FloorHandoff
 from .s1_fixed_walls import FixedWalls
@@ -49,6 +50,12 @@ class LiveMatcher(FloorMatcher):
         self.pose_check=PoseCheck(self)
         self.corridors = CorridorMatcher(self)
         self.original = OriginalMap(self)
+        self.elevators=ElevatorMatcher(self)
+
+    def warmup(self):
+        super().warmup()
+        for floor in self.floors:
+            if floor['floor']=='B2':self.elevators.reference(floor['layout_id'])
 
     def prepare_paired_floor(self, layout):
         for level,other in (('B2','B3'),('B3','B2')):
