@@ -14,6 +14,7 @@ from .s1_devices import device_points
 from .s1_layer_probe import LayerProbe
 from .s1_view_motion import ViewFeatures,zoom_position,zoom_changed,zoom_allows_scale
 from .s1_round_lock import RoundLock,direct_pose
+from .s1_transition_record import TransitionRecorder
 
 
 class FloorChanged(Exception):
@@ -54,6 +55,7 @@ class LiveController(base.LiveController):
         self.last_note_at = 0.
         self.diagnostic_busy = False
         super().__init__(*args, **kwargs)
+        self.transition_recorder=TransitionRecorder(self.diagnostics)
         self.note('trigger_waiting', f'地图键：{self.app.map_key.get()}。打开地图即可开始匹配。'
                   if self.app.binding else '请先绑定游戏地图键。')
 
@@ -635,6 +637,7 @@ class LiveController(base.LiveController):
                     if floor!=measured['selected_floor']:
                         sample['shared_attempt']=dict(source_floor=measured['selected_floor'],selected_floor=floor,
                             continuous=continuous,mouse_ready=pointer_ready,**audit)
+                        sample['transition_source']=measured
                     if result:sample['transfer_source']=measured
                 elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and not locked))
                                  and automatic and not manual and not self.warming and floor_limit in ('自动','B2')
@@ -849,6 +852,8 @@ class LiveController(base.LiveController):
             self.map_open_since=sample['at']
         if sample.get('shared_attempt'):
             self.note('shared_floor_attempt',None,**sample['shared_attempt'])
+            recorder=getattr(self,'transition_recorder',None)
+            if recorder and sample.get('transition_source'):recorder.observe(sample,sample['transition_source'])
         if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
             self.transfer_from=getattr(self,'observed_floor',None)
             sample['returned_to_entrance']=level=='B1' and self.transfer_from in ('B2','B3','B4')
@@ -1340,6 +1345,7 @@ class LiveController(base.LiveController):
                     and self.round_lock.shared_layout==result['floor']['layout_id']
                     and sample['epoch']==self.generation):
                 shared=dict(self.view_cache)
+                shared['diagnostic_frame'],shared['diagnostic_scale']=TransitionRecorder.picture(sample['frame'])
                 shared['floor_matrices']={level:self.matcher.coordinates.predict(shared,level)[0]
                                          for level in ('B1','B2','B3')}
                 self.shared_view=shared

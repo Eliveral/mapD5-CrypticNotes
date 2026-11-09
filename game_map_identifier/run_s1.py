@@ -56,6 +56,9 @@ if __name__ == '__main__':
                     prior['unique_layout']=True
                     prior['player_hd']=matcher.handoffs.player_position(prior_image,prior['floor'],prior['matrix'])
         landing_pose=None
+        if '--shared-session' in sys.argv and prior and lock.shared_layout and selected and presence['visible']:
+            prior.update(at=-2.,sample_at=-2.,zoom=zoom_position(prior_image))
+            landing_pose=matcher.shared_floor(frame,prior,selected,zoom=zoom_position(frame),continuous=False)
         if '--shared-floor-click' in sys.argv and prior and lock.shared_layout and selected:
             from src.s1_map_camera import PointerSnapshot
             from src.s1_floor_buttons import selected_button
@@ -182,7 +185,7 @@ if __name__ == '__main__':
                 'render_sha256':hashlib.sha256(rendered.tobytes()).hexdigest() if rendered is not None else None,
                 'floor':r.get('floor',{}).get('id'),'inliers':r.get('inliers'),
                 'matrix':r['matrix'].tolist() if r['accepted'] else None,
-                'shared_camera':bool(r.get('shared_camera')),'camera_only':bool(r.get('camera_only')),
+                'shared_camera':bool(r.get('shared_camera')),'camera_mode':r.get('camera_mode'),'camera_only':bool(r.get('camera_only')),
                 'capture_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
                 'scope':'Saved frame replay; no live input or projection'}
         (project_root()/'s1-capture-check.json').write_text(json.dumps(result,indent=2),encoding='utf-8')

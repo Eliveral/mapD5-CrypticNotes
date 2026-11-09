@@ -171,7 +171,7 @@ class FloorHandoff:
                 return name,start,end
         return None
 
-    def refine_passage(self,small,geom,valid,floor,pose,factor,site):
+    def refine_passage(self,small,geom,valid,floor,pose,factor,site,radius_hint=0):
         # The character can take a few steps between observations. Search for
         # the paired room's actual walls near the marker, without changing scale.
         model=self.site(floor,site[2])
@@ -188,7 +188,7 @@ class FloorHandoff:
         if x<0 or y<0 or x+w>geom.shape[1] or y+h>geom.shape[0]:return None
         sharp=cv2.Canny(cv2.cvtColor(small[y:y+h,x:x+w],cv2.COLOR_BGR2GRAY),25,60)
         clear=cv2.erode(valid,np.ones((7,7),np.uint8))[y:y+h,x:x+w]>0
-        radius=max(6,round(small.shape[0]*.07))
+        radius=max(6,round(small.shape[0]*.07),int(radius_hint))
         affine=pose.copy()*factor
         affine[:,2]-=(x-radius,y-radius)
         ref=cv2.warpAffine(model[0],affine,(w+2*radius,h+2*radius),flags=cv2.INTER_NEAREST)
@@ -210,6 +210,76 @@ class FloorHandoff:
         if score.max()>best-.07:return None
         result=pose.copy();result[:,2]+=(np.array([radius-xx,radius-yy])/factor)
         return result
+
+    def arrival_room(self,image,area,visit,target,clear=None,audit=None):
+        # A last map observation can precede the walk to the stairs. Do not
+        # require that stale player position to be inside the passage.
+        report=audit if audit is not None else {}
+        def reject(reason):
+            report['arrival_reason']=reason
+            return None
+        source=visit['floor'];layout=source['layout_id']
+        sites=self.coords.passages.get((layout,source['floor'],target),[])
+        if not sites:return reject('no_direct_passage')
+        marker=self.player_screen(image)
+        if marker is None:return reject('no_current_player')
+        predicted,_=self.coords.predict(visit,target)
+        if predicted is None:return reject('missing_calibration')
+        floor=self.floors[layout+'_'+target]
+        factor=min(1.,800/image.shape[1])
+        small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
+        valid=exclude_map_hud(area(small))
+        if clear is not None:
+            valid &= np.uint8(cv2.resize(clear,small.shape[1::-1],interpolation=cv2.INTER_AREA)>=252)*255
+        geom=geometry(small)&valid
+        sharp=cv2.Canny(cv2.cvtColor(small,cv2.COLOR_BGR2GRAY),25,60)
+        sharp=(cv2.dilate(sharp,np.ones((3,3),np.uint8))>0)&(cv2.erode(valid,np.ones((7,7),np.uint8))>0)
+        room=np.uint8(geom==127)*255
+        lines=[]
+        for i,line in enumerate(self.sides(room)):
+            kernel=np.ones((8,1) if i//2==0 else (1,8),np.uint8)
+            lines.append(cv2.morphologyEx(np.uint8((line>0)&sharp),cv2.MORPH_OPEN,kernel))
+        directions=[i for i,line in enumerate(lines) if np.count_nonzero(line)>=10]
+        report['arrival_sides']=len(directions)
+        if len(directions)<3:return reject('fewer_than_three_walls')
+        hits=[]
+        for passage in sites:
+            name,start,end=passage
+            site=self.site(floor,end)
+            if site is None:continue
+            mask,box,point=site
+            basis=predicted.copy()
+            basis[:,2]=marker-basis[:,:2]@point
+            scale=float(np.linalg.norm(basis[0,:2]))
+            radius=max(box[2:])*scale*factor*.60+6
+            aligned=self.refine_passage(small,geom,valid,floor,basis,factor,passage,radius)
+            if aligned is None:continue
+            projection=cv2.warpAffine(mask*255,aligned*factor,small.shape[1::-1],flags=cv2.INTER_NEAREST)
+            px,py=np.rint(marker*factor).astype(int)
+            if not (0<=px<projection.shape[1] and 0<=py<projection.shape[0] and projection[py,px]):continue
+            # Opposite walls give an actual dimension; a generic fog corner is
+            # insufficient even if the only named passage is a rectangle.
+            matched=[]
+            for i,edge in enumerate(self.sides(projection)):
+                line=lines[i]
+                if np.count_nonzero(line)<10:continue
+                rate=float(cv2.dilate(edge,np.ones((5,5),np.uint8))[line>0].mean())
+                if rate>=.85:matched.append(i)
+            if len(matched)!=len(directions):continue
+            expected=projection>0;seen=geom==127
+            if (expected&seen).sum()<.89*seen.sum():continue
+            if len(matched)==4:
+                # Four observed walls describe the whole room. A smaller ordinary
+                # room cannot borrow matching sides from inside a larger station.
+                expected=projection>0;seen=geom==127
+                if (expected&seen).sum()<.86*expected.sum():continue
+            hit=self.paired_edges(small,geom,valid,floor,aligned,factor,visit,passage)
+            if hit:
+                hit.update(search='paired_arrival_room',passage=name)
+                hits.append(hit)
+        if len(hits)!=1:return reject('passage_walls_not_unique')
+        report['arrival_reason']='accepted'
+        return hits[0]
 
     def paired_edges(self, small, geom, valid, floor, predicted, factor, visit,site_hint=None,matched_return=False):
         # At the inherited camera, visible straight sides can corroborate a pose

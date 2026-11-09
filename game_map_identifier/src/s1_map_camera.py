@@ -96,6 +96,8 @@ def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=No
              and pointer.click_at>boundary)
     continuing=same_input and source['floor']==target and visit.get('shared_camera')
     gesture=bool(clicked or continuing)
+    report.update(pointer_present=pointer is not None,same_input=bool(same_input),
+                  clicked=bool(clicked),source_player=visit.get('player_hd') is not None)
 
     factor=min(1.,800/image.shape[1])
     small=cv2.resize(image,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
@@ -134,4 +136,13 @@ def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=No
             hit.update(search='shared_camera',shared_camera=True,camera_mode=mode,camera_only=False)
             report.update(reason='accepted',mode=mode)
             return hit
+        # A whole or three-sided passage room can determine the new center,
+        # even if the player walked there with the source map closed.
+        floor_click=bool(pointer and pointer.click_at>visit.get('sample_at',visit.get('at',float('inf'))))
+        if not continuous and not floor_click:
+            hit=matcher.handoffs.arrival_room(image,area,visit,target,clear,report)
+            if hit:
+                hit.update(search='shared_camera',shared_camera=True,camera_mode='arrival_room',camera_only=False)
+                report.update(reason='accepted',mode='arrival_room')
+                return hit
     return reject('target_pose_unverified' if sum(counts)>=100 else 'target_empty_without_continuity')
