@@ -5,6 +5,38 @@ from src.s1_window import main as s1_main
 from src.app import main as legacy_main
 
 if __name__ == '__main__':
+    if '--self-check-input' in sys.argv:
+        import ctypes,json,time
+        from ctypes import wintypes as W
+        from src.s1_raw_mouse import RawMouse,Device
+        from src.s1_program_update import APP_TAG
+        from src.config import project_root
+        u=ctypes.WinDLL('user32',use_last_error=True)
+        u.GetRegisteredRawInputDevices.argtypes=[ctypes.POINTER(Device),ctypes.POINTER(W.UINT),W.UINT]
+        u.GetRegisteredRawInputDevices.restype=W.UINT
+        u.DispatchMessageW.argtypes=[ctypes.POINTER(W.MSG)]
+        u.DispatchMessageW.restype=ctypes.c_ssize_t
+        def registered():
+            devices=(Device*32)();n=W.UINT(32)
+            count=u.GetRegisteredRawInputDevices(devices,ctypes.byref(n),ctypes.sizeof(Device))
+            assert count!=0xffffffff
+            return [(d.usage_page,d.usage,d.flags,d.target) for d in list(devices)[:count]]
+        before=registered();observer=RawMouse(lambda *args:None)
+        try:
+            observer.enable(True);during=registered()
+            assert (1,2,0x100,observer.hwnd) in during
+            msg=W.MSG();end=time.monotonic()+.3
+            while time.monotonic()<end:
+                for _ in range(256):
+                    if not u.PeekMessageW(ctypes.byref(msg),None,0,0,1):break
+                    u.DispatchMessageW(ctypes.byref(msg))
+                observer.flush_move();time.sleep(.008)
+        finally:observer.close()
+        after=registered();assert before==after
+        (project_root()/'s1-input-check.json').write_text(json.dumps(dict(version=APP_TAG,
+            backend='raw_input',before=before,during=during,after=after,passed=True,
+            scope='Native asynchronous mouse registration and cleanup; game rotation requires user test'),indent=2),'utf8')
+        raise SystemExit(0)
     if '--self-check-transition' in sys.argv:
         import json,time,cv2,numpy as np,hashlib
         from pathlib import Path

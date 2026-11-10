@@ -22,7 +22,7 @@ from zipfile import BadZipFile,ZipFile
 from .s1_updates import REPO
 from .s1_update_worker import INSTALL_SCRIPT
 
-APP_TAG='v3.7.31-rc.1'
+APP_TAG='v3.7.32-rc.1'
 API_ROOT=f'https://api.github.com/repos/{REPO}'
 PROGRAM='MapD5.exe'
 FULL_NAME='MapD5-Windows-x64.zip'

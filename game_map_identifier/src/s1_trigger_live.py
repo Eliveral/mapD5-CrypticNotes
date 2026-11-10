@@ -1536,6 +1536,7 @@ class LiveController(base.LiveController):
                 elif kind == 'b2_check_error':self.note('b2_check_error','负二核对稍后重试。',error=data)
                 elif kind == 'pose_checked':self.pose_checked(*data)
                 elif kind == 'pose_check_error':self.note('pose_check_error','墙线校准稍后重试。',error=data)
+                elif kind == 'mouse_observer':self.note('mouse_observer',None,**data)
                 elif kind == 'hook_ready':
                     self.hook_ready = data
                     self.note('input_observer_ready' if data else 'input_observer_unavailable')
