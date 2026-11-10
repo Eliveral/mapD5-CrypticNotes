@@ -247,10 +247,12 @@ class LiveController(base.LiveController):
         self.proof_due=sample['at']+interval
         entry=state.b2_arrival or state.recheck_b2_after_landing
         def verify():
+            began=time.perf_counter()
             reference=None
             try:
                 frame,clear=sample['b2_pixels']
-                hit=self.matcher.confirm_b2(frame,clear,incumbent,entry=entry,local_layout=local_layout)
+                hit=self.matcher.confirm_b2(frame,clear,incumbent,entry=entry,local_layout=local_layout,
+                                            native_scale=sample.get('review_native_scale'))
                 if hit:
                     reference={k:sample[k] for k in ('at','revision','game','roi')}
                     reference.update(floor=hit['floor'],matrix=hit['matrix'],selected_floor='B2',
@@ -266,6 +268,9 @@ class LiveController(base.LiveController):
             except Exception as exc:
                 self.events.put(('b2_check_error',str(exc)))
             finally:
+                self.events.put(('review_finished',dict(selected_floor='B2',sample_at=sample['at'],
+                    elapsed_ms=round((time.perf_counter()-began)*1000),scale=sample.get('review_native_scale'),
+                    found=bool(reference),floor_id=reference['floor']['id'] if reference else None)))
                 self.events.put(('b2_check',(state,token,reference)))
         threading.Thread(target=verify,daemon=True).start()
 
@@ -281,17 +286,23 @@ class LiveController(base.LiveController):
         incumbent=review.layout or (None if self.round_lock.blocks_floor('B2') else self.round_lock.layout)
         self.landing_due=sample['at']+(.4 if review.pending or self.round_lock.blocks_floor('B3') or not incumbent else 8.)
         def inspect():
+            began=time.perf_counter()
             ref=None
             try:
                 image,clear=sample['b3_pixels']
-                hit=self.matcher.review_landing(image,clear,incumbent,pending=review.pending)
+                hit=self.matcher.review_landing(image,clear,incumbent,pending=review.pending,
+                                                native_scale=sample.get('review_native_scale'))
                 if hit:
                     ref={key:sample[key] for key in ('game','revision','roi','at')}
                     ref.update(floor=hit['floor'],selected_floor='B3',unique_layout=True,result=hit,
                                matrix=hit['matrix'],cells=hit['cells'],disjoint_proof=hit.get('disjoint_proof',False),conflicting_models=hit.get('conflicting_models',False),signature=signature(image),
                                view_features=ViewFeatures(image,map_area,clear))
             except Exception as exc:self.events.put(('landing_error',str(exc)))
-            finally:self.events.put(('landing_checked',(review,token,ref)))
+            finally:
+                self.events.put(('review_finished',dict(selected_floor='B3',sample_at=sample['at'],
+                    elapsed_ms=round((time.perf_counter()-began)*1000),scale=sample.get('review_native_scale'),
+                    found=bool(ref),floor_id=ref['floor']['id'] if ref else None)))
+                self.events.put(('landing_checked',(review,token,ref)))
         threading.Thread(target=inspect,daemon=True).start()
 
     def landing_checked(self,review,token,ref):
@@ -520,6 +531,9 @@ class LiveController(base.LiveController):
         trusted={'B2':local_b2 or locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
         reviewed=dict(self.review_signatures)
+        scale_visits=[v for v in (self.view_cache,known_visit,known_b2,b3_visit,landing.reference)
+                      if v and v.get('game')==game and v.get('roi')==roi]
+        scale_visits.sort(key=lambda v:v.get('sample_at',v['at']),reverse=True)
         shared_layout=self.round_lock.shared_layout if automatic else None
         pointer_observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
         pointer_ready=getattr(getattr(self,'hotkeys',None),'mouse_ready',False) is True
@@ -610,6 +624,9 @@ class LiveController(base.LiveController):
                         self.valid_visit(last,sample,30) and positive_at-last.get('sample_at',0)<1.5 and
                         'probe' in last and self.matches_clean_view(last,sample)):
                     check_b1=False
+                if presence['visible']:
+                    sample['review_native_scale']=next((scale for visit in scale_visits
+                        if (scale:=self.matcher.review_native_scale(visit,zoom)) is not None),None)
                 if awaiting_opening and presence['visible'] and floor in ('B1','B2','B3','B4'):
                     sample['round_opening']=True
                     if floor in ('B2','B3'):
@@ -621,10 +638,15 @@ class LiveController(base.LiveController):
                     if not presence['visible'] or floor not in ('B2','B3'):return
                     fresh=(floor in blocked and not self.warming and
                            (floor not in reviewed or not same_view(sig,reviewed[floor])))
-                    if not (fresh or (verify if floor=='B2' else verify_b3)):return
+                    # A running review retains the latest positive input in one
+                    # bounded slot. Room-colour equality must not discard new corridors.
+                    busy=self.proof_job if floor=='B2' else self.landing_job
+                    if not (fresh or (floor in blocked and busy) or (verify if floor=='B2' else verify_b3)):return
                     sample['fresh_review']=fresh
                     key='b2_pixels' if floor=='B2' else 'b3_pixels'
                     sample[key]=(probe.uncovered_frame(frame),probe.unpainted) if probe and clear is None else (frame,clear)
+                    sample['review_snapshot']={k:sample.get(k) for k in
+                        ('at','revision','game','roi','signature','selected_floor','fresh_review','review_native_scale',key)}
                 if presence['visible'] and not manual and floor not in ('B1','B2','B3'):
                     self.events.put(('sample',sample))
                     return
@@ -884,8 +906,10 @@ class LiveController(base.LiveController):
                        elevator_verified=hit['elevator_verified'],contradicts=hit['elevator_verified'],
                        view_features=hit['view_features'],player_hd=self.matcher.handoffs.player_position(sample['frame'],hit['floor'],hit['matrix']))
             self.apply_b2_observation(self.round_lock,ref)
-        if sample['presence']['visible'] and level=='B2':self.begin_proof(sample)
-        if sample['presence']['visible'] and sample.get('selected_floor')=='B3':self.begin_landing(sample)
+        review=sample.get('review_snapshot') or (sample if sample['presence']['visible'] else None)
+        if review:
+            if review.get('selected_floor')=='B2':self.begin_proof(review)
+            if review.get('selected_floor')=='B3':self.begin_landing(review)
         if (sample['presence']['visible'] and not sample.get('manual') and 'selected_floor' in sample
                 and level not in ('B1','B2','B3')):
             if not self.latest or self.latest.get('selected_floor')!=level:
@@ -973,7 +997,9 @@ class LiveController(base.LiveController):
             if self.overlay and self.overlay._visible:self.overlay.hide()
             self.display=self.pending=None
             if level in ('B2','B3') and not sample.get('probing'):self.save_sample_async(sample)
-            self.note('waiting_b3_review' if level=='B3' else 'waiting_b2_review',self.round_lock.status(),selected_floor=level)
+            self.note('waiting_b3_review' if level=='B3' else 'waiting_b2_review',self.round_lock.status(),
+                      selected_floor=level,review_scale=sample.get('review_native_scale'),
+                      review_busy=bool(self.landing_job if level=='B3' else self.proof_job))
             return
         if sample.get('handoff'):
             self.pending=None
@@ -1503,6 +1529,7 @@ class LiveController(base.LiveController):
                     if self.active and self.game and target and target[0]==self.game.hwnd:
                         self.note('floor_click',None,input_at=clicked_at,click_y=click_y)
 
+                elif kind == 'review_finished':self.note('review_finished',None,**data)
                 elif kind == 'landing_checked':self.landing_checked(*data)
                 elif kind == 'landing_error':self.note('landing_error','负三独立复核稍后重试。',error=data)
                 elif kind == 'b2_check':self.proof_received(*data)

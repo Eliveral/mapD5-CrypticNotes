@@ -194,7 +194,7 @@ class LiveController:
         self.history = self.history[-200:]
         try:
             self.diagnostics.mkdir(parents=True, exist_ok=True)
-            if state in ('round_locked','round_rechecking','round_corrected','round_reset','b2_conflict','pose_offset','landing_rechecking','landing_confirmed','unsupported_floor','round_opening','camera_reacquire','shared_floor_attempt','map_key','escape_key','floor_click','floor_detected','floor_changed','map_closed') or (
+            if state in ('round_locked','round_rechecking','round_corrected','round_reset','b2_conflict','pose_offset','landing_rechecking','landing_confirmed','unsupported_floor','round_opening','camera_reacquire','shared_floor_attempt','map_key','escape_key','floor_click','floor_detected','floor_changed','map_closed','review_finished','waiting_b2_review','waiting_b3_review') or (
                     state=='overlay_shown' and details.get('floor_id')):
                 # Keep the submitted floor and its lock together beyond the short
                 # screen-state buffer. Two bounded files, no images or input events.

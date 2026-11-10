@@ -26,7 +26,15 @@ if __name__ == '__main__':
             unique_layout=True,provisional=False)
         matcher.prepare_paired_floor(floor['layout_id'])
         cv2.setNumThreads(2);audit={};began=time.perf_counter()
-        result=matcher.shared_floor(frame,visit,evidence['target'],zoom=evidence['target_zoom'],continuous=False,audit=audit)
+        if '--independent-review' in sys.argv:
+            scale=matcher.review_native_scale(visit,evidence['target_zoom'])
+            audit['native_scale']=scale
+            result=(matcher.review_landing(frame,incumbent=floor['layout_id'],native_scale=scale)
+                    if evidence['target']=='B3' else matcher.confirm_b2(frame,incumbent=floor['layout_id'],native_scale=scale))
+            audit['conflicting_models']=bool(result and result.get('conflicting_models'))
+            audit['inliers']=result and result.get('inliers')
+        else:
+            result=matcher.shared_floor(frame,visit,evidence['target'],zoom=evidence['target_zoom'],continuous=False,audit=audit)
         report=dict(version=APP_TAG,accepted=bool(result),floor=result and result['floor']['id'],
             matrix=result and result['matrix'].tolist(),camera_mode=result and result.get('camera_mode'),
             ms=round((time.perf_counter()-began)*1000),audit=audit,

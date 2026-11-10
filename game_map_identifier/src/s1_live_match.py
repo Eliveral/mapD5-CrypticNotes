@@ -463,14 +463,33 @@ class LiveMatcher(FloorMatcher):
                 if result['accepted'] or result.get('candidates'): break
         return result
 
-    def review_landing(self,image,clear=None,incumbent=None,pending=None):
+    def review_native_scale(self,visit,zoom):
+        if (not visit or not visit.get('unique_layout') or visit.get('provisional')
+                or zoom is None or visit.get('zoom') is None
+                or zoom_changed(visit['zoom'],zoom)):
+            return None
+        atlas=self.coordinates.matrices.get(visit['floor']['id'])
+        if atlas is None:return None
+        value=float(np.linalg.norm(visit['matrix'][0,:2])*np.linalg.norm(np.asarray(atlas)[0,:2]))
+        return value if np.isfinite(value) and value>0 else None
+
+    def review_walls(self,image,clear,full=None,level='B2',incumbent=None,poses=None,native_scale=None):
+        hit,support=compare_walls(self,image,map_area,clear,full,level=level,
+                                 incumbent=incumbent,poses=poses,native_scale=native_scale)
+        if hit is None and native_scale is not None and full is None:
+            # A scale hint is an acceleration, not a permanent search boundary.
+            if poses is not None:poses.clear()
+            return compare_walls(self,image,map_area,clear,full,level=level,incumbent=incumbent,poses=poses)
+        return hit,support
+
+    def review_landing(self,image,clear=None,incumbent=None,pending=None,native_scale=None):
         # A B2 passage and a previous B3 visit are position hints only. Compare
         # all B3 images on real unpainted pixels, without supplying their IDs.
         generation=self.devices.generation
         full=self._locate_live(image,None,'B3',1280,1024,verification=True,clear=clear)
         full=full if self.broad_b2(full,image.shape) else None
         poses=[]
-        hit,support=compare_walls(self,image,map_area,clear,full,level='B3',incumbent=incumbent,poses=poses)
+        hit,support=self.review_walls(image,clear,full,level='B3',incumbent=incumbent,poses=poses,native_scale=native_scale)
         if hit and hit.get('conflicting_models'):return hit
         if not hit or (full and hit['floor']['id']!=full['floor']['id']):return None
         if incumbent not in (None,hit['floor']['layout_id']) and support.get(incumbent,0)>=.70*hit['inliers']:
@@ -507,14 +526,14 @@ class LiveMatcher(FloorMatcher):
             self.devices.observe(image,map_area,clear,hit,generation)
         return hit
 
-    def confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None):
+    def confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None,native_scale=None):
         generation=self.devices.generation
-        hit=self._confirm_b2(image,clear,incumbent,entry,local_layout)
+        hit=self._confirm_b2(image,clear,incumbent,entry,local_layout,native_scale)
         if hit and incumbent==hit['floor']['layout_id'] and (hit.get('proof_kind')=='full' or hit.get('local_verified')):
             self.devices.observe(image,map_area,clear,hit,generation)
         return hit
 
-    def _confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None):
+    def _confirm_b2(self,image,clear=None,incumbent=None,entry=False,local_layout=None,native_scale=None):
         # A pose suggested by a prior, a manual selection or an overlay must
         # never count as an independent identification of the round.
         hit=self._locate_live(image,None,'B2',1280,1024,verification=True,clear=clear)
@@ -522,7 +541,7 @@ class LiveMatcher(FloorMatcher):
         if full and not incumbent and not entry:
             full['proof_kind']='full'
             return full
-        wall,support=compare_walls(self,image,map_area,clear,full,incumbent=incumbent)
+        wall,support=self.review_walls(image,clear,full,incumbent=incumbent,native_scale=native_scale)
         if wall and wall.get('conflicting_models'):return wall
         if not wall:
             if full and not entry and full['floor']['layout_id']==incumbent:

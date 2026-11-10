@@ -6,7 +6,7 @@ from .s1_view_motion import ViewFeatures,exclude_map_hud
 from .s1_entrance import turns
 
 
-def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None,poses=None):
+def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None,poses=None,native_scale=None):
     features=ViewFeatures(image,area,clear)
     g=features.geom
     _,_,stats,centers=cv2.connectedComponentsWithStats(np.uint8(g==127))
@@ -20,6 +20,10 @@ def compare_walls(matcher,image,area,clear,full=None,level='B2',incumbent=None,p
     # Compare scales in HD pixels; different atlas templates use different crops/resolutions.
     if full:
         base=full['scale']*np.linalg.norm(np.asarray(matcher.coordinates.matrices[full['floor']['id']])[0,:2])
+        ratios=(.88,.95,1.,1.05,1.13)
+    elif native_scale is not None:
+        # Only scale is borrowed. Every floor and translation still competes.
+        base=native_scale
         ratios=(.88,.95,1.,1.05,1.13)
     else:
         base=1.
