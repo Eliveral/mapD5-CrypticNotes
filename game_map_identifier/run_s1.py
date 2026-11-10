@@ -5,6 +5,34 @@ from src.s1_window import main as s1_main
 from src.app import main as legacy_main
 
 if __name__ == '__main__':
+    if '--self-check-transition' in sys.argv:
+        import json,time,cv2,numpy as np,hashlib
+        from pathlib import Path
+        from src.config import project_root
+        from src.s1_catalog import S1Catalog,read_image
+        from src.s1_live_match import LiveMatcher
+        from src.s1_program_update import APP_TAG
+        path=Path(sys.argv[sys.argv.index('--self-check-transition')+1])
+        evidence=json.loads(path.read_text('utf8'))
+        target=path.with_name(path.stem+'-target.png')
+        if not target.is_file():target=path.with_name('target.png')
+        if evidence.get('files'):
+            assert hashlib.sha256(target.read_bytes()).hexdigest()==evidence['files'][target.name]
+        frame=read_image(target);matcher=LiveMatcher(S1Catalog(map_root(project_root())))
+        floor=matcher.handoffs.floors[evidence['source']]
+        visit=dict(floor=floor,matrix=np.asarray(evidence['source_matrix'])*evidence['target_scale'],
+            player_hd=np.asarray(evidence['player_hd']) if evidence.get('player_hd') is not None else None,
+            zoom=evidence['source_zoom'],at=evidence['source_at'],sample_at=evidence['source_at'],
+            unique_layout=True,provisional=False)
+        matcher.prepare_paired_floor(floor['layout_id'])
+        cv2.setNumThreads(2);audit={};began=time.perf_counter()
+        result=matcher.shared_floor(frame,visit,evidence['target'],zoom=evidence['target_zoom'],continuous=False,audit=audit)
+        report=dict(version=APP_TAG,accepted=bool(result),floor=result and result['floor']['id'],
+            matrix=result and result['matrix'].tolist(),camera_mode=result and result.get('camera_mode'),
+            ms=round((time.perf_counter()-began)*1000),audit=audit,
+            scope='Saved actual input and trusted source context; not a new live gameplay run')
+        (project_root()/'s1-transition-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),'utf8')
+        raise SystemExit(0)
     if '--self-check-capture' in sys.argv:
         import json, hashlib, cv2
         from pathlib import Path

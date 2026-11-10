@@ -29,6 +29,30 @@ class TransitionEvidenceTests(unittest.TestCase):
             count=rec.count
             rec.observe(sample,source);self.assertEqual(rec.count,count)
 
+    def test_async_record_owns_attempt_snapshot(self):
+        pending=[]
+        class Deferred:
+            def __init__(self,target,**kwargs):pending.append(target)
+            def start(self):pass
+        with tempfile.TemporaryDirectory() as folder, patch('src.s1_transition_record.threading.Thread',Deferred):
+            rec=TransitionRecorder(Path(folder))
+            source=dict(floor={'id':'s1_11_B2'},at=1.,matrix=np.eye(2,3),zoom=.7,player_hd=np.array([2.,3.]))
+            sample=dict(selected_floor='B3',frame=np.zeros((20,30,3),np.uint8),
+                at=2.,zoom=.7,shared_attempt={'reason':'accepted'})
+            rec.observe(sample,source)
+            sample.update(selected_floor=None,zoom=None)
+            sample['frame'][:]=255;sample['shared_attempt']['reason']='changed'
+            source['matrix'][:]=0
+            pending[0]()
+            doc=json.loads((rec.root/'transition-0.json').read_text('utf8'))
+            self.assertEqual(doc['target'],'B3')
+            self.assertEqual(doc['attempt']['reason'],'accepted')
+            self.assertEqual(doc['source_matrix'],[[1.,0.,0.],[0.,1.,0.]])
+            import cv2,hashlib
+            data=(rec.root/'transition-0-target.png').read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(),doc['files']['transition-0-target.png'])
+            self.assertFalse(cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR).any())
+
     def test_frame_scale_retains_aspect(self):
         image,scale=TransitionRecorder.picture(np.zeros((1000,2000,3),np.uint8))
         self.assertEqual(image.shape,(640,1280,3));self.assertEqual(scale,.64)

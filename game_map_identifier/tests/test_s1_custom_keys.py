@@ -46,17 +46,18 @@ class LocalObserver(Hotkeys):
     def close(self):pass
 
 
-def test_shortcut_and_escape_priority():
+def test_shortcut_and_escape_priority(monkeypatch):
+    monkeypatch.setattr('src.s1_hotkeys.time.monotonic',lambda:12.5)
     o=LocalObserver(Queue(),MapBinding(0x78))
     assert 703 not in o.shortcut_ids()
     o.observe(0x78,True,0,70);o.observe(0x78,True,0,70)
-    assert o.events.get_nowait()==('map_key',('map',70)) and o.events.empty()
+    assert o.events.get_nowait()==('map_key',('map',70,12.5)) and o.events.empty()
     o.set_map_key(MapBinding(0x1B))
     o.observe(0x1B,True,0,70)
-    assert o.events.get_nowait()==('map_key',('map',70)) and 703 in o.shortcut_ids()
+    assert o.events.get_nowait()==('map_key',('map',70,12.5)) and 703 in o.shortcut_ids()
     o.observe(0x1B,False,0,70);o.set_map_key(MapBinding(65))
     o.observe(0x1B,True,0,70)
-    assert o.events.get_nowait()==('map_key',('escape',70))
+    assert o.events.get_nowait()==('map_key',('escape',70,12.5))
 
 
 def press(app,key,mods=0,point=None,hwnd=None):

@@ -2,6 +2,7 @@
 import ctypes
 from ctypes import wintypes as W
 import threading
+import time
 
 from .s1_keys import MapBinding, MODIFIER, MOUSE, CTRL, ALT, SHIFT, WIN, physical_key
 from .s1_game import KeyEdges
@@ -54,7 +55,7 @@ class Hotkeys:
         if capture is not None:
             if not repeat:capture.observe(key,down,mods,hwnd,point)
         elif action:
-            self.events.put(('map_key',(action,hwnd)))
+            self.events.put(('map_key',(action,hwnd,time.monotonic())))
 
     def run(self):
         u=ctypes.windll.user32
@@ -86,7 +87,12 @@ class Hotkeys:
             try:
                 if code>=0 and self.pointer.target is not None:
                     d=ctypes.cast(address,ctypes.POINTER(MouseData)).contents
+                    before=self.pointer.snapshot()
                     self.pointer.observe(message,(d.pt.x,d.pt.y),u.GetForegroundWindow())
+                    after=self.pointer.snapshot()
+                    if message==0x201 and after and (before is None or after.click_at!=before.click_at):
+                        self.events.put(('floor_click',(after.click_at,after.click_y,self.pointer.target)))
+
                 if code>=0 and (message in BUTTON_MESSAGES or message in (0x20B,0x20C)):
                     d=ctypes.cast(address,ctypes.POINTER(MouseData)).contents
                     if message in BUTTON_MESSAGES:

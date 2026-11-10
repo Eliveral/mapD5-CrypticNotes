@@ -8,7 +8,7 @@ from .s1_alignment import FloorMatcher, geometry, register
 from .s1_floor_transition import CorridorMatcher, FloorCoordinates
 from .s1_original_map import OriginalMap
 from .s1_landmarks import RoomLabels
-from .s1_entrance import EntranceMatcher
+from .s1_entrance import EntranceMatcher,turns
 from .s1_station import StationMatcher
 from .s1_elevator import ElevatorMatcher
 from .s1_blackboard import board_pose
@@ -67,6 +67,9 @@ class LiveMatcher(FloorMatcher):
             if floor and sites:
                 self.original.source(floor)
                 self.corridors.reference_channels(floor)
+                if level in ('B2','B3'):
+                    self.pose_check.hd_walls.refs[floor['id']]=turns(self.pose_check.hd_geometry(floor),4)
+                    self.pose_check.distances(floor['id'],True)
                 if level=='B3':self.pose_check.distances(floor['id'],True)
                 for _,point,_ in sites:self.handoffs.site(floor,point)
 

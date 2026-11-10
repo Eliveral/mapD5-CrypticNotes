@@ -234,7 +234,19 @@ class FloorHandoff:
         geom=geometry(small)&valid
         sharp=cv2.Canny(cv2.cvtColor(small,cv2.COLOR_BGR2GRAY),25,60)
         sharp=(cv2.dilate(sharp,np.ones((3,3),np.uint8))>0)&(cv2.erode(valid,np.ones((7,7),np.uint8))>0)
-        room=np.uint8(geom==127)*255
+        # Validate the player's local room, not every explored room at once.
+        _,labels,stats,_=cv2.connectedComponentsWithStats(np.uint8(geom==127))
+        px,py=np.rint(marker*factor).astype(int)
+        if not (0<=px<geom.shape[1] and 0<=py<geom.shape[0]):return reject('player_outside_map')
+        index=int(labels[py,px])
+        if not index:
+            near=labels[max(0,py-5):py+6,max(0,px-5):px+6]
+            choices=[int(i) for i in np.unique(near) if i and stats[i,4]>=70]
+            if len(choices)!=1:return reject('player_room_unclear')
+            index=choices[0]
+        room=np.uint8(labels==index)*255
+        local=geom.copy()
+        local[(geom==127)&(labels!=index)]=0
         lines=[]
         for i,line in enumerate(self.sides(room)):
             kernel=np.ones((8,1) if i//2==0 else (1,8),np.uint8)
@@ -252,7 +264,7 @@ class FloorHandoff:
             basis[:,2]=marker-basis[:,:2]@point
             scale=float(np.linalg.norm(basis[0,:2]))
             radius=max(box[2:])*scale*factor*.60+6
-            aligned=self.refine_passage(small,geom,valid,floor,basis,factor,passage,radius)
+            aligned=self.refine_passage(small,local,valid,floor,basis,factor,passage,radius)
             if aligned is None:continue
             projection=cv2.warpAffine(mask*255,aligned*factor,small.shape[1::-1],flags=cv2.INTER_NEAREST)
             px,py=np.rint(marker*factor).astype(int)
@@ -266,12 +278,12 @@ class FloorHandoff:
                 rate=float(cv2.dilate(edge,np.ones((5,5),np.uint8))[line>0].mean())
                 if rate>=.85:matched.append(i)
             if len(matched)!=len(directions):continue
-            expected=projection>0;seen=geom==127
+            expected=projection>0;seen=room>0
             if (expected&seen).sum()<.89*seen.sum():continue
             if len(matched)==4:
                 # Four observed walls describe the whole room. A smaller ordinary
                 # room cannot borrow matching sides from inside a larger station.
-                expected=projection>0;seen=geom==127
+                expected=projection>0;seen=room>0
                 if (expected&seen).sum()<.86*expected.sum():continue
             hit=self.paired_edges(small,geom,valid,floor,aligned,factor,visit,passage)
             if hit:

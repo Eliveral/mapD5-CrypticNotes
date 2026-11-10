@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .s1_alignment import geometry
+from .s1_shared_geometry import refine_shared
 from .s1_floor_buttons import selected_button
 from .s1_view_motion import exclude_map_hud, zoom_changed
 
@@ -75,6 +76,13 @@ def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=No
         return None
     if not visit or not visit.get('unique_layout') or visit.get('provisional'):return reject('unverified_source')
     source=visit['floor']
+    report.update(source_at=visit.get('sample_at',visit.get('at')),
+        source_open_since=visit.get('open_since'),
+        pointer_epoch=pointer.epoch if pointer else None,
+        raw_click_at=pointer.click_at if pointer else None,
+        raw_click_y=pointer.click_y if pointer else None,
+        source_pointer_epoch=getattr(visit.get('pointer'),'epoch',None))
+
     if target not in ('B1','B2','B3'):return reject('unsupported_floor')
     before=visit.get('zoom')
     if before is None or zoom is None or zoom_changed(before,zoom):return reject('zoom_changed_or_unknown')
@@ -144,5 +152,11 @@ def shared_floor(matcher,image,area,visit,target,clear=None,zoom=None,pointer=No
             if hit:
                 hit.update(search='shared_camera',shared_camera=True,camera_mode='arrival_room',camera_only=False)
                 report.update(reason='accepted',mode='arrival_room')
+                return hit
+        if not continuous:
+            hit=refine_shared(matcher,image,area,visit,target,clear,report)
+            if hit:
+                hit.update(search='shared_camera',shared_camera=True,camera_mode='local_geometry',camera_only=False)
+                report.update(reason='accepted',mode='local_geometry')
                 return hit
     return reject('target_pose_unverified' if sum(counts)>=100 else 'target_empty_without_continuity')

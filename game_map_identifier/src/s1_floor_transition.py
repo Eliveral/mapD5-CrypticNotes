@@ -81,7 +81,7 @@ class CorridorMatcher:
         return self.reference[floor['id']]
 
     def locate(self, geom, layout, floor_name, scale_hint=None, *, quick=False, predicted=None,
-               zoom_ratios=(.94,1.,1.06), paired=False):
+               zoom_ratios=(.94,1.,1.06), paired=False, fixed_scale=False):
         if floor_name not in ('B1', 'B2', 'B3'):
             return None
         _, labels, stats, _ = cv2.connectedComponentsWithStats((geom > 0).astype(np.uint8))
@@ -160,7 +160,7 @@ class CorridorMatcher:
             if score < placements[0][0]-.09: break
             if floor['id'] not in refined:
                 refined.add(floor['id'])
-                factors = () if local_center is not None else ((.97,1.03) if quick else (.94,.97,1.03,1.06))
+                factors = () if fixed_scale or local_center is not None else ((.97,1.03) if quick else (.94,.97,1.03,1.06))
                 for factor in factors: search(scale*factor, [floor])
         placements.sort(key=lambda row:row[0], reverse=True)
         score, floor, scale, px, py, agreement = placements[0]

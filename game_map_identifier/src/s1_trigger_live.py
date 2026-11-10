@@ -443,7 +443,7 @@ class LiveController(base.LiveController):
         super().map_key_changed()
         self.note('trigger_key_changed', f'触发键：{self.app.map_key.get()}。按下立即抓图；画面确认开关。')
 
-    def map_key(self, action, hwnd):
+    def map_key(self, action, hwnd, input_at=None):
         if not self.active or self.suspended: return
         self.sync_target()
         if not self.game or hwnd != self.game.hwnd or base.foreground() != hwnd: return
@@ -453,7 +453,8 @@ class LiveController(base.LiveController):
         self.burst_until = time.monotonic()+1.2
         self.due = 0  # No 320 ms animation wait, and never count toggle parity.
         self.note('map_key' if action == 'map' else 'escape_key',
-                  '已收到地图键：立即连续抓图…' if action == 'map' else '已隐藏覆盖，正在确认地图关闭。')
+                  '已收到地图键：立即连续抓图…' if action == 'map' else '已隐藏覆盖，正在确认地图关闭。',\
+                  input_at=input_at if input_at is not None else time.monotonic())
 
     def launch(self):
         if not self.game or base.foreground() != self.game.hwnd: return
@@ -638,6 +639,12 @@ class LiveController(base.LiveController):
                         sample['shared_attempt']=dict(source_floor=measured['selected_floor'],selected_floor=floor,
                             continuous=continuous,mouse_ready=pointer_ready,**audit)
                         sample['transition_source']=measured
+                        # Later freshness checks replace sample.frame/floor. Keep
+                        # the actual attempted input and metadata together.
+                        sample['transition_snapshot']={k:sample.get(k) for k in
+                            ('revision','selected_floor','zoom','at','shared_attempt','clear_mask')}
+                        sample['transition_snapshot']['frame']=frame.copy()
+
                     if result:sample['transfer_source']=measured
                 elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and not locked))
                                  and automatic and not manual and not self.warming and floor_limit in ('自动','B2')
@@ -853,7 +860,7 @@ class LiveController(base.LiveController):
         if sample.get('shared_attempt'):
             self.note('shared_floor_attempt',None,**sample['shared_attempt'])
             recorder=getattr(self,'transition_recorder',None)
-            if recorder and sample.get('transition_source'):recorder.observe(sample,sample['transition_source'])
+            if recorder and sample.get('transition_source'):recorder.observe(sample.get('transition_snapshot',sample),sample['transition_source'])
         if sample['presence']['visible'] and level and not sample.get('manual') and level!=getattr(self,'observed_floor',None):
             self.transfer_from=getattr(self,'observed_floor',None)
             sample['returned_to_entrance']=level=='B1' and self.transfer_from in ('B2','B3','B4')
@@ -1477,7 +1484,7 @@ class LiveController(base.LiveController):
                       search=d.get('search'),camera_mode=d.get('camera_mode'),passage=d.get('passage'),matrix=d.get('matrix'),shift_px=d.get('shift_px'),zoom=d.get('zoom'),
                       possible_layouts=d.get('possible_layouts'),common_only=d.get('common_only',False),
                       camera_ms=current.get('camera_ms'),draw_ms=current.get('draw_ms'),
-                      first_for_open=first,frame_to_show_ms=round((time.monotonic()-current['at'])*1000),
+                      sample_at=current['at'],first_for_open=first,frame_to_show_ms=round((time.monotonic()-current['at'])*1000),
                       positive_to_show_ms=round((time.monotonic()-opening)*1000))
 
     def tick(self):
@@ -1491,6 +1498,11 @@ class LiveController(base.LiveController):
                     elif data == 'hide': self.toggle_hidden()
                     elif data == 'stop': self.stop()
                 elif kind == 'map_key': self.map_key(*data)
+                elif kind == 'floor_click':
+                    clicked_at,click_y,target=data
+                    if self.active and self.game and target and target[0]==self.game.hwnd:
+                        self.note('floor_click',None,input_at=clicked_at,click_y=click_y)
+
                 elif kind == 'landing_checked':self.landing_checked(*data)
                 elif kind == 'landing_error':self.note('landing_error','负三独立复核稍后重试。',error=data)
                 elif kind == 'b2_check':self.proof_received(*data)
