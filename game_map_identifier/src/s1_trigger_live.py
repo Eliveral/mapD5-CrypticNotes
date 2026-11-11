@@ -531,8 +531,9 @@ class LiveController(base.LiveController):
         trusted={'B2':local_b2 or locked,'B3':landing.layout or pair_locked}
         review_due={'B2':self.proof_due,'B3':getattr(self,'landing_due',0.)}
         reviewed=dict(self.review_signatures)
-        scale_visits=[v for v in (self.view_cache,known_visit,known_b2,b3_visit,landing.reference)
-                      if v and v.get('game')==game and v.get('roi')==roi]
+        scale_visits=[v for v in (self.view_cache,b1_visit,known_visit,known_b2,b3_visit,landing.reference)
+                      if v and v.get('game')==game and v.get('roi')==roi
+                      and (not recheck_b2 or v.get('sample_at',v['at'])>=self.round_lock.b2_since)]
         scale_visits.sort(key=lambda v:v.get('sample_at',v['at']),reverse=True)
         shared_layout=self.round_lock.shared_layout if automatic else None
         pointer_observer=getattr(getattr(self,'hotkeys',None),'pointer',None)
@@ -668,14 +669,23 @@ class LiveController(base.LiveController):
                         sample['transition_snapshot']['frame']=frame.copy()
 
                     if result:sample['transfer_source']=measured
-                elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and not locked))
+                elevator_source=(floor=='B2' and (observed=='B1' or (transfer_from=='B1' and (not locked or recheck_b2)))
                                  and automatic and not manual and not self.warming and floor_limit in ('自动','B2')
                                  and presence['visible'] and self.valid_visit(b1_visit,sample,300)
                                  and b1_visit.get('unique_layout') and not b1_visit.get('provisional'))
                 new_b2_view=(not self.display or observed=='B1' or (not probe and measured
                              and not same_view(sig,measured.get('signature'))))
                 if not result and elevator_source and (changing or (not probe and new_b2_view)):
+                    began_lift=time.perf_counter()
                     result=self.matcher.elevators.locate(frame,map_area,b1_visit,clear,zoom)
+                    sample['elevator_attempt']=dict(source_floor='B1',selected_floor='B2',
+                        source_layout=b1_visit['floor']['layout_id'],old_layout=locked,rechecking=recheck_b2,
+                        found=bool(result),verified=bool(result and result.get('elevator_verified')),
+                        elapsed_ms=round((time.perf_counter()-began_lift)*1000))
+                    sample['elevator_snapshot']={k:sample.get(k) for k in
+                        ('revision','selected_floor','zoom','at','clear_mask')}
+                    sample['elevator_snapshot'].update(frame=frame.copy(),shared_attempt=sample['elevator_attempt'])
+                    sample['elevator_record_source']=b1_visit
                     if result:sample['elevator_source']=b1_visit
                 if presence['visible'] and floor in blocked and not result:
                     attach_review()
@@ -879,6 +889,10 @@ class LiveController(base.LiveController):
         level=sample.get('selected_floor')
         if sample['presence']['visible'] and (not self.latest or not self.latest['presence']['visible']):
             self.map_open_since=sample['at']
+        if sample.get('elevator_attempt'):
+            self.note('elevator_attempt',None,**sample['elevator_attempt'])
+            recorder=getattr(self,'transition_recorder',None)
+            if recorder:recorder.observe(sample['elevator_snapshot'],sample['elevator_record_source'])
         if sample.get('shared_attempt'):
             self.note('shared_floor_attempt',None,**sample['shared_attempt'])
             recorder=getattr(self,'transition_recorder',None)
@@ -1370,6 +1384,9 @@ class LiveController(base.LiveController):
                                    handoff_origin=result.get('handoff_origin'),
                                    alternatives=result.get('common_floors'))
             self.view_cache['open_since']=getattr(self,'map_open_since',None)
+            if (sample.get('selected_floor')=='B1' and self.view_cache['unique_layout']
+                    and not self.view_cache['provisional']):
+                self.view_cache['diagnostic_frame'],self.view_cache['diagnostic_scale']=TransitionRecorder.picture(sample['frame'])
             handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
             if handoffs and not sample.get('manual'):
                 self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])
