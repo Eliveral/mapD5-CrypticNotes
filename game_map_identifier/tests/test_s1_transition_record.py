@@ -18,10 +18,10 @@ class TransitionEvidenceTests(unittest.TestCase):
                 player_hd=np.array([10.,20.]),diagnostic_frame=np.zeros((50,100,3),np.uint8),diagnostic_scale=.5)
             sample=dict(revision=1,selected_floor='B3',frame=np.zeros((100,200,3),np.uint8),
                 at=2.,zoom=.7,shared_attempt={'reason':'target_pose_unverified'})
-            for n in range(9):
+            for n in range(27):
                 source['sample_at']=n
                 rec.observe(sample,source)
-            files=list(rec.root.glob('*.json'));self.assertEqual(len(files),6)
+            files=list(rec.root.glob('*.json'));self.assertEqual(len(files),24)
             for file in files:
                 doc=json.loads(file.read_text('utf8'))
                 self.assertTrue(doc['has_source']);self.assertFalse(doc['has_clear'])
@@ -53,8 +53,11 @@ class TransitionEvidenceTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(data).hexdigest(),doc['files']['transition-0-target.png'])
             self.assertFalse(cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR).any())
 
-    def test_frame_scale_retains_aspect(self):
-        image,scale=TransitionRecorder.picture(np.zeros((1000,2000,3),np.uint8))
-        self.assertEqual(image.shape,(640,1280,3));self.assertEqual(scale,.64)
+    def test_frame_preserves_native_pixels_and_owns_memory(self):
+        source=np.random.default_rng(17).integers(0,256,(1000,2000,3),dtype=np.uint8)
+        image,scale=TransitionRecorder.picture(source)
+        self.assertEqual(image.shape,source.shape);self.assertEqual(scale,1.)
+        self.assertTrue(np.array_equal(image,source))
+        self.assertFalse(np.shares_memory(image,source))
 
 if __name__=='__main__':unittest.main()

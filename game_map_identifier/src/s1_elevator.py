@@ -43,7 +43,9 @@ class ElevatorMatcher:
         return floor,center,seed,fields,cv2.cvtColor(art[y-101:y+101,x-101:x+101],cv2.COLOR_BGR2GRAY)
 
     @staticmethod
-    def find_room(image,valid,seed,scales):
+    def find_room(image,valid,seed,scales,audit=None):
+        audit={} if audit is None else audit
+        audit.update(reason='no_visible_elevator_room')
         factor=min(1.,800/image.shape[1])
         gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
         view=cv2.resize(gray,None,fx=factor,fy=factor,interpolation=cv2.INTER_AREA)
@@ -69,6 +71,7 @@ class ElevatorMatcher:
         if not candidates:return None
         score,center,scale=max(candidates,key=lambda row:row[0])
         rival=max((v for v,p,_ in candidates if np.linalg.norm(p-center)>max(12.,scale*60)),default=0.)
+        audit.update(reason='coarse_texture_or_ambiguity',coarse_texture=round(float(score),4),texture_rival=round(float(rival),4))
         if score<.82 or score-rival<.075:return None
         # Refine the measured centre and scale on original pixels.
         pad=round(scale*15)+3;l,t=np.maximum(0,np.floor(center-90*scale-pad).astype(int))
@@ -80,6 +83,7 @@ class ElevatorMatcher:
             _,v,_,(u,y0)=cv2.minMaxLoc(cv2.matchTemplate(crop,tile,cv2.TM_CCOEFF_NORMED))
             if not np.all(valid[t+y0:t+y0+n,l+u:l+u+n]):continue
             if best is None or v>best[0]:best=(v,np.array([l+u+n*.5,t+y0+n*.5]),n/156.)
+        audit.update(reason='refined_texture',refined_texture=round(float(best[0]),4) if best else None)
         return best if best and best[0]>=.81 else None
 
     @staticmethod
@@ -131,12 +135,15 @@ class ElevatorMatcher:
         if not rates or not walls:return 0.,0.
         return .65*np.mean(walls)+.35*np.mean(rates),min(rates)
 
-    def locate(self,image,area,source,clear=None,zoom=None):
+    def locate(self,image,area,source,clear=None,zoom=None,audit=None):
+        audit={} if audit is None else audit
+        audit.update(reason='ineligible_source')
         if (not source or source['floor']['floor']!='B1' or not source.get('unique_layout')
                 or source.get('provisional') or source.get('alternatives')):return None
         layout=source['floor']['layout_id'];m=self.matcher
         ref=self.reference(layout)
         if ref is None:return None
+        audit.update(reason='missing_registered_pair')
         valid=exclude_map_hud(area(image))
         if clear is not None:valid &= np.uint8(clear>=252)*255
         pred,_=m.coordinates.predict(source,'B2')
@@ -145,8 +152,8 @@ class ElevatorMatcher:
         hint=np.linalg.norm((pred@np.vstack((reg,[0,0,1])))[0,:2])
         unchanged=zoom is not None and source.get('zoom') is not None and not zoom_changed(source['zoom'],zoom)
         scales=np.geomspace(.2,2.65,21)*image.shape[0]/1377.
-        found=self.find_room(image,valid,ref[2],hint*np.array([.96,1.,1.04])) if unchanged else None
-        if found is None:found=self.find_room(image,valid,ref[2],scales)
+        found=self.find_room(image,valid,ref[2],hint*np.array([.96,1.,1.04]),audit) if unchanged else None
+        if found is None:found=self.find_room(image,valid,ref[2],scales,audit)
         if found is None:return None
         texture,pixel,measured=found
         groups=self.evidence(image,valid,pixel)
@@ -162,6 +169,7 @@ class ElevatorMatcher:
             (strength,coverage),scale=max(((self.score(ref,groups,z),z) for z in options),key=lambda row:row[0][0])
         if unchanged and abs(hint/scale-1)<.025 and self.score(ref,groups,hint)[0]>=strength-.023:
             scale=hint;strength,coverage=self.score(ref,groups,scale)
+        audit.update(reason='visible_walls_disagree',wall_strength=round(float(strength),4),floor_coverage=round(float(coverage),4),island=bool(island),measured_scale=round(float(scale),5))
         if strength<.68 or coverage<.90:return None
         rivals=[]
         # Every calibrated layout contains this same elevator. Its distinctive
@@ -173,6 +181,7 @@ class ElevatorMatcher:
             if alt is None:return None
             rivals.append(max(self.score(alt,groups,scale*z)[0] for z in (.96,1.,1.04)))
         rival=max(rivals,default=1.)
+        audit.update(reason='another_layout_fits_better',layout_rival=round(float(rival),4))
         if not island and rival>strength+.055:return None
         native=np.float64([[scale,0,pixel[0]-ref[1][0]*scale],[0,scale,pixel[1]-ref[1][1]*scale]])
         mat=native@np.linalg.inv(np.vstack((reg,[0,0,1])))
@@ -196,4 +205,5 @@ class ElevatorMatcher:
                 camera=aligned@np.linalg.inv(np.vstack((reg,[0,0,1])))
                 common.append(dict(floor=other,matrix=camera))
             result.update(shared_elevator_only=True,common_floors=common)
+        audit.update(reason='verified_neighbourhood' if result['elevator_verified'] else 'shared_elevator_only')
         return result

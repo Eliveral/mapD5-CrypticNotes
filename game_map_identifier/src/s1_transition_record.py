@@ -16,8 +16,8 @@ class TransitionRecorder:
 
     @staticmethod
     def picture(frame):
-        scale=min(1.,1280/frame.shape[1])
-        return cv2.resize(frame,None,fx=scale,fy=scale,interpolation=cv2.INTER_AREA),scale
+        # Recognition evidence must preserve the pixels actually evaluated.
+        return frame.copy(),1.
 
     def observe(self,sample,source):
         sample=dict(sample);source=dict(source)
@@ -32,7 +32,7 @@ class TransitionRecorder:
         source['matrix']=source['matrix'].copy()
         if source.get('player_hd') is not None:source['player_hd']=source['player_hd'].copy()
         self.busy=True;self.count+=1;self.saved_at=now
-        slot=self.slot;self.slot=(slot+1)%6
+        slot=self.slot;self.slot=(slot+1)%24
         def save():
             try:
                 self.root.mkdir(parents=True,exist_ok=True)
@@ -59,7 +59,7 @@ class TransitionRecorder:
                     source_scale=source.get('diagnostic_scale'),target_scale=scale,
                     has_source=original is not None,has_clear=clear is not None,files=files,
                     attempt=sample.get('shared_attempt'),source_at=source.get('sample_at'),target_at=sample['at'],
-                    scope='Observed app capture, downscaled; projection accuracy requires separate verification')
+                    scope='Native app capture; projection accuracy and action classification require separate verification')
                 tmp=self.root/(name+'.tmp')
                 tmp.write_text(json.dumps(payload,ensure_ascii=False,indent=2),'utf8')
                 tmp.replace(self.root/(name+'.json'))

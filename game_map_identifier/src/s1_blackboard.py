@@ -163,6 +163,21 @@ def symbol_pose(matcher,image,area,floor,point,sites,measured,clear,scale_hint,b
         if scale_hint is None:
             fine=np.linspace(scale*.95,scale*1.05,13)
             quality,scale=max((evaluate(anchor,z),z) for z in fine)
+        # Printed atlas symbols are not survey-grade centres. With a measured
+        # scale, fit a few screen pixels of translation to BOTH wall directions.
+        # Keep a tiny fog island at the original symbol pose; it cannot refine
+        # a camera independently. This never changes layout or scale.
+        if fixed and not board and len(axes)==2 and np.ptp(positions,axis=0).max()>=small.shape[0]*.17:
+            radius=min(7.,max(3.,image.shape[0]*.0045))
+            best=(quality,anchor)
+            for dx in (-radius,-radius/2,0.,radius/2,radius):
+                for dy in (-radius,-radius/2,0.,radius/2,radius):
+                    if dx*dx+dy*dy>radius*radius:continue
+                    adjusted=anchor+np.array([dx,dy])/scale
+                    q=evaluate(adjusted,scale)
+                    if q[2]>=.92 and q[1]>=.32 and q[0]>best[0][0]:
+                        best=(q,adjusted)
+            quality,anchor=best
         candidates.append((quality,scale,anchor,ranked))
     candidates.sort(key=lambda row:row[0],reverse=True)
     (score,weakest,coverage),scale,anchor,ranked=candidates[0]

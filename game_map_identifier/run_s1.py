@@ -263,7 +263,7 @@ if __name__ == '__main__':
         from src.s1_window import S1Window, DEFAULT_OVERLAY_OPACITY
         from src.config import project_root
         app=S1Window(autostart=False, controls=False, start_hidden=True)
-        app.geometry('+30000+30000');app.deiconify();app.update();checked=[];alchemy_views=[];race_views=[]
+        app.geometry('+30000+30000');app.deiconify();app.update();checked=[];alchemy_views=[];race_views=[];cart_views=[]
         assert app.map_key.get() == 'Caps Lock' and app.overlay_style.get() == '高清底图'
         assert app.overlay_alpha.get()==DEFAULT_OVERLAY_OPACITY and app.opacity_label.get()=='28%'
         assert tuple(app.floor_buttons)==('B1','B2','B3','all') and len(app.tree.get_children())==len(app.layouts)
@@ -283,6 +283,11 @@ if __name__ == '__main__':
             assert app.current['id']==e['id'] and app.original is not None and len(app.canvas.find_all())==1
             displayed=sorted(text for text,_,_ in app.gallery_labels)
             expected={'B1':[], 'B2':['维修站'], 'B3':['维修站','寰星房']}
+            for level in ('B1','B2','B3'):
+                points=app.room_labels.points.get(e['layout_id']+'_'+level,{})
+                expected[level].extend('矿车密道' for key in points if key.startswith('cart'))
+            carts=displayed.count('矿车密道')
+            if carts:cart_views.append(dict(id=e['id'],count=carts))
             if 'race' in app.room_labels.points.get(e['layout_id']+'_B2', {}):
                 expected['B2'].append('竞速房')
             if '竞速房' in displayed:
@@ -292,7 +297,7 @@ if __name__ == '__main__':
             if '炼金室' in displayed:
                 alchemy_views.append(e['id'])
             if e['kind']=='structure':
-                assert displayed==sorted(['B1','B2','B3',*expected['B2'],*expected['B3']])
+                assert displayed==sorted(['B1','B2','B3',*expected['B1'],*expected['B2'],*expected['B3']])
             else:
                 assert displayed==sorted(expected[e['floor']])
             app.switch_pair();app.select();app.update()
@@ -319,7 +324,7 @@ if __name__ == '__main__':
         app.set_map_binding(MapBinding(0x14))
         button_check['configurable_map_key']=True
         app.destroy()
-        (project_root()/'s1-ui-check.json').write_text(json.dumps({'checked':checked,'alchemy_views':alchemy_views,'race_views':race_views,'one_click':button_check,'scope':'Tk render state and real button callbacks; not live-game visual inspection'},indent=2),encoding='utf-8')
+        (project_root()/'s1-ui-check.json').write_text(json.dumps({'checked':checked,'alchemy_views':alchemy_views,'race_views':race_views,'cart_views':cart_views,'one_click':button_check,'scope':'Tk render state and real button callbacks; not live-game visual inspection'},indent=2),encoding='utf-8')
         raise SystemExit(0)
     if '--self-check' in sys.argv:
         import json

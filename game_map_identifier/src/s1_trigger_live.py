@@ -677,11 +677,12 @@ class LiveController(base.LiveController):
                              and not same_view(sig,measured.get('signature'))))
                 if not result and elevator_source and (changing or (not probe and new_b2_view)):
                     began_lift=time.perf_counter()
-                    result=self.matcher.elevators.locate(frame,map_area,b1_visit,clear,zoom)
+                    lift_audit={}
+                    result=self.matcher.elevators.locate(frame,map_area,b1_visit,clear,zoom,audit=lift_audit)
                     sample['elevator_attempt']=dict(source_floor='B1',selected_floor='B2',
                         source_layout=b1_visit['floor']['layout_id'],old_layout=locked,rechecking=recheck_b2,
                         found=bool(result),verified=bool(result and result.get('elevator_verified')),
-                        elapsed_ms=round((time.perf_counter()-began_lift)*1000))
+                        elapsed_ms=round((time.perf_counter()-began_lift)*1000),**lift_audit)
                     sample['elevator_snapshot']={k:sample.get(k) for k in
                         ('revision','selected_floor','zoom','at','clear_mask')}
                     sample['elevator_snapshot'].update(frame=frame.copy(),shared_attempt=sample['elevator_attempt'])

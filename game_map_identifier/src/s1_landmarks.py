@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 from .s1_alchemy import ALCHEMY_CENTERS
+from .s1_minecart import MINECART_SITES
 
 
 # B2 starter rooms explicitly marked 发令台 in the 展十 S1 atlas.
@@ -19,7 +20,8 @@ RACE_CENTERS = {
     ("s1_10", "d5495600d93bafc28cc94af48a5becbd81854e210878fca88c3f2f3f107d2517"): (1665, 1180),
 }
 
-ROOM_NAMES = {'supply':'维修站', 'star':'寰星房', 'alchemy':'炼金室', 'race':'竞速房'}
+ROOM_NAMES = {'supply':'维修站', 'star':'寰星房', 'alchemy':'炼金室', 'race':'竞速房',
+              'cart1':'矿车密道', 'cart2':'矿车密道'}
 
 
 @lru_cache(maxsize=18)
@@ -52,6 +54,9 @@ class RoomLabels:
             if entry['kind'] != 'hd':
                 continue
             level=entry['floor']
+            fid=entry['layout_id']+'_'+level
+            for i,point in enumerate(MINECART_SITES.get(entry['sha256'],()),1):
+                self.points.setdefault(fid,{}).setdefault('cart'+str(i),point)
             if level=='B2':
                 key='race'
                 center=RACE_CENTERS.get((entry['layout_id'],entry['sha256']))
