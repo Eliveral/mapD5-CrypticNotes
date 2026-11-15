@@ -72,7 +72,13 @@ class ElevatorMatcher:
         score,center,scale=max(candidates,key=lambda row:row[0])
         rival=max((v for v,p,_ in candidates if np.linalg.norm(p-center)>max(12.,scale*60)),default=0.)
         audit.update(reason='coarse_texture_or_ambiguity',coarse_texture=round(float(score),4),texture_rival=round(float(rival),4))
-        if score<.82 or score-rival<.075:return None
+        # A newly opened B2 can expose only a small, partially animated
+        # elevator room. When its texture has a separated runner-up, retain
+        # the coarse pose so the shared elevator area can be shown immediately.
+        # The wall and rival checks still decide whether the wider layout is
+        # verified. A weak or ambiguous animation frame is rejected.
+        coarse_only=score>=.55 and score-rival>=.08
+        if score<.55 or score-rival<.075:return None
         # Refine the measured centre and scale on original pixels.
         pad=round(scale*15)+3;l,t=np.maximum(0,np.floor(center-90*scale-pad).astype(int))
         rr,bb=np.minimum(gray.shape[::-1],np.ceil(center+90*scale+pad).astype(int))
@@ -84,7 +90,11 @@ class ElevatorMatcher:
             if not np.all(valid[t+y0:t+y0+n,l+u:l+u+n]):continue
             if best is None or v>best[0]:best=(v,np.array([l+u+n*.5,t+y0+n*.5]),n/156.)
         audit.update(reason='refined_texture',refined_texture=round(float(best[0]),4) if best else None)
-        return best if best and best[0]>=.81 else None
+        if best and best[0]>=.81:return best
+        if coarse_only:
+            audit['coarse_only']=True
+            return score,center,scale
+        return None
 
     @staticmethod
     def fit_outer_walls(image,valid,tile,pixel,measured):
@@ -156,6 +166,7 @@ class ElevatorMatcher:
         if found is None:found=self.find_room(image,valid,ref[2],scales,audit)
         if found is None:return None
         texture,pixel,measured=found
+        coarse_only=bool(audit.get('coarse_only'))
         groups=self.evidence(image,valid,pixel)
         island=all(not len(p) or np.max(np.abs(p))<=150*measured for p in groups)
         precise=None if island else self.fit_outer_walls(image,valid,ref[4],pixel,measured)
@@ -169,8 +180,9 @@ class ElevatorMatcher:
             (strength,coverage),scale=max(((self.score(ref,groups,z),z) for z in options),key=lambda row:row[0][0])
         if unchanged and abs(hint/scale-1)<.025 and self.score(ref,groups,hint)[0]>=strength-.023:
             scale=hint;strength,coverage=self.score(ref,groups,scale)
+        early_shared=bool(coarse_only and (strength<.68 or coverage<.90))
         audit.update(reason='visible_walls_disagree',wall_strength=round(float(strength),4),floor_coverage=round(float(coverage),4),island=bool(island),measured_scale=round(float(scale),5))
-        if strength<.68 or coverage<.90:return None
+        if (strength<.68 or coverage<.90) and not early_shared:return None
         rivals=[]
         # Every calibrated layout contains this same elevator. Its distinctive
         # texture fixes position, but cannot identify the round by itself.
@@ -182,7 +194,7 @@ class ElevatorMatcher:
             rivals.append(max(self.score(alt,groups,scale*z)[0] for z in (.96,1.,1.04)))
         rival=max(rivals,default=1.)
         audit.update(reason='another_layout_fits_better',layout_rival=round(float(rival),4))
-        if not island and rival>strength+.055:return None
+        if not island and rival>strength+.055 and not early_shared:return None
         native=np.float64([[scale,0,pixel[0]-ref[1][0]*scale],[0,scale,pixel[1]-ref[1][1]*scale]])
         mat=native@np.linalg.inv(np.vstack((reg,[0,0,1])))
         result=m.handoffs.result(ref[0],mat,'升降梯',float(strength),False)
