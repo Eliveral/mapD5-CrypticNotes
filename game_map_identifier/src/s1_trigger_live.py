@@ -56,6 +56,7 @@ class LiveController(base.LiveController):
         self.diagnostic_busy = False
         super().__init__(*args, **kwargs)
         self.transition_recorder=TransitionRecorder(self.diagnostics)
+        self.display_recorder=TransitionRecorder(self.diagnostics/'display_gaps',slots=6)
         self.note('trigger_waiting', f'地图键：{self.app.map_key.get()}。打开地图即可开始匹配。'
                   if self.app.binding else '请先绑定游戏地图键。')
 
@@ -606,6 +607,7 @@ class LiveController(base.LiveController):
                 zoom=zoom_position(frame) if presence['visible'] and not manual else None
                 changed_zoom=bool(probe and zoom_changed(probe.zoom,zoom))
                 stationary = bool(probe and presence['visible'] and not changed_zoom and probe.stationary(frame, opacity))
+                capture_frame=frame
                 changing=bool(shown and floor!=shown.get('selected_floor'))
                 check_b1=bool(independent_b1 and presence['visible'] and not self.warming and
                               (time.monotonic()>=b1_due or changing or (probe and not stationary) or
@@ -619,6 +621,7 @@ class LiveController(base.LiveController):
                     clear=probe.unpainted
                 sig=signature(frame) if presence['visible'] else None
                 sample=dict(epoch=epoch,game=game,roi=roi,frame=frame,presence=presence,
+                    capture_frame=capture_frame,
                     scale_reference=reference,zoom=zoom,zoom_changed=changed_zoom,signature=sig,selected_floor=floor,probing=probe is not None,stationary=stationary,clear_mask=clear,observed_probe=probe,
                     pointer=pointer,at=positive_at,manual=manual,revision=revision,capture_ms=round((positive_at-began)*1000,1))
                 if (check_b1 and not probe and not self.display and last and
@@ -820,6 +823,11 @@ class LiveController(base.LiveController):
                         new_floor=selected_floor(fresh)
                         checked=time.monotonic()
                         current_pointer=pointer_observer.snapshot() if pointer_ready else None
+                        # A failed fresh registration does not prove the old
+                        # projection moved. Check its reference on raw pixels
+                        # before masking the overlay out of the search image.
+                        fresh_stationary=bool(probe and check['visible'] and probe.stationary(fresh,opacity))
+                        sample['capture_frame']=fresh
                         if probe:
                             fresh=probe.uncovered_frame(fresh)
                             clear=probe.unpainted
@@ -827,7 +835,7 @@ class LiveController(base.LiveController):
                         new_zoom=zoom_position(fresh) if check['visible'] and not manual else None
                         new_sig=signature(fresh) if check['visible'] else None
                         sample.update(frame=fresh,presence=check,selected_floor=new_floor,signature=new_sig,
-                                      checked_at=checked,stationary=False,zoom=new_zoom,
+                                      checked_at=checked,stationary=fresh_stationary,zoom=new_zoom,
                                       zoom_changed=bool(probe and zoom_changed(probe.zoom,new_zoom)))
                         sample.pop('view_features',None);sample.pop('player_update',None)
                         if result.get('input_shared') and current_pointer!=pointer:
@@ -880,6 +888,48 @@ class LiveController(base.LiveController):
             worker.shutdown(wait=False)
             self.capture_worker=None
 
+    def keep_display_for_retry(self,sample,reason,now):
+        display=self.display
+        if (not display or not self.overlay or not self.overlay._visible or display.get('provisional')
+                or display.get('epoch')!=sample['epoch'] or not sample['presence']['visible']
+                or sample.get('selected_floor') not in (None,display.get('selected_floor'))
+                or sample.get('zoom_changed') or zoom_changed(display.get('zoom'),sample.get('zoom'))
+                or display.get('pointer') is None or sample.get('pointer')!=display['pointer']
+                or self.round_lock.blocks_floor(display.get('selected_floor'))):
+            return False
+        since=display.setdefault('unsteady_since',now)
+        if now-since>=.25:return False
+        if not display.get('retry_reported'):
+            display['retry_reported']=True
+            self.note('display_rechecking',selected_floor=display.get('selected_floor'),reason=reason)
+        self.due=now+.012
+        return True
+
+    def record_display_loss(self,sample,reason):
+        display=self.display
+        if not display or not self.overlay or not self.overlay._visible:return
+        self.note('display_lost',selected_floor=sample.get('selected_floor'),reason=reason,
+                  presence=sample['presence'],stationary=bool(sample.get('stationary')),
+                  pointer_changed=sample.get('pointer')!=display.get('pointer'))
+        # Ordinary closed maps need only a timing entry. Preserve full pixels
+        # for ambiguous closes and failed observations while the map is open.
+        if (reason=='map_closed' and sample.get('selected_floor') is None
+                and max(sample['presence'].get('scores',{}).values(),default=0)<.5):return
+        source=self.view_cache
+        recorder=getattr(self,'display_recorder',None)
+        if not recorder or not source or source['floor']['id']!=display.get('label'):return
+        evidence=dict(sample,frame=sample.get('capture_frame',sample['frame']),clear_mask=None,
+                      shared_attempt=dict(reason=reason,presence=sample['presence'],
+                                          stationary=bool(sample.get('stationary')),
+                                          pointer_changed=sample.get('pointer')!=display.get('pointer')))
+        recorder.observe(evidence,source)
+
+    def display_recovered(self,now):
+        if self.display.pop('retry_reported',False):
+            self.note('display_recovered',selected_floor=self.display.get('selected_floor'),
+                      elapsed_ms=round((now-self.display.get('unsteady_since',now))*1000))
+        self.display.pop('unsteady_since',None)
+
     def sample_received(self, sample):
         self.sampling = False
         if (not self.active or self.hidden or self.suspended or sample['game'] != self.game or
@@ -927,6 +977,8 @@ class LiveController(base.LiveController):
             if review.get('selected_floor')=='B3':self.begin_landing(review)
         if (sample['presence']['visible'] and not sample.get('manual') and 'selected_floor' in sample
                 and level not in ('B1','B2','B3')):
+            if level is None and self.keep_display_for_retry(sample,'unreadable_floor',time.monotonic()):return
+            self.record_display_loss(sample,'unsupported_floor' if level else 'unreadable_floor')
             if not self.latest or self.latest.get('selected_floor')!=level:
                 self.generation+=1
                 sample['epoch']=self.generation
@@ -971,12 +1023,6 @@ class LiveController(base.LiveController):
                 if shared and shared['floor']['id']==visit['floor']['id']:
                     for key in ('player_hd','player_at','at','pointer'):
                         if key in visit:shared[key]=visit[key]
-        if sample['presence']['visible'] and not sample.get('manual') and not sample.get('selected_floor') and self.display and self.display.get('selected_floor'):
-            since=self.display.setdefault('uncertain_floor_since',now)
-            if now-since<.16:
-                self.due=now+.012
-                return
-        elif self.display:self.display.pop('uncertain_floor_since',None)
         if sample['presence']['visible'] and not sample['presence'].get('bridged'):
             self.last_strong_map=sample['at']
         if sample['presence']['visible'] and (not previous or not previous['presence']['visible']
@@ -999,6 +1045,7 @@ class LiveController(base.LiveController):
                       selected_floor=sample['selected_floor'])
         self.due = now + (.012 if visible or now < self.burst_until else .20)
         if not visible:
+            self.record_display_loss(sample,'map_closed')
             if self.overlay and self.overlay._visible: self.overlay.hide()
             self.display = None
             # Retain already captured positive frames for background learning.
@@ -1022,6 +1069,9 @@ class LiveController(base.LiveController):
             return
         if sample.get('observed_probe') and (sample.get('zoom_changed')
                 or not sample.get('stationary')):
+            reason='zoom' if sample.get('zoom_changed') else 'unconfirmed_motion'
+            if self.keep_display_for_retry(sample,reason,now):return
+            self.record_display_loss(sample,reason)
             self.note('camera_reacquire','地图视角已变，正在用新画面重新定位。',
                       selected_floor=level,reason='zoom' if sample.get('zoom_changed') else 'pan')
             self.display=self.pending=None
@@ -1037,7 +1087,7 @@ class LiveController(base.LiveController):
             if self.display and self.display.get('selected_floor') == sample.get('selected_floor'):
                 if sample['stationary'] and not self.display.get('provisional'):
                     self.check_pose(sample,self.view_cache,'structure' if self.app.overlay_style.get()=='结构' else 'original_clean')
-                    self.display.pop('unsteady_since',None)
+                    self.display_recovered(now)
                     if not self.display.get('uploaded'):self.show_display()
                     self.due = now+.06
                     return
@@ -1046,6 +1096,7 @@ class LiveController(base.LiveController):
             if self.display:self.display.setdefault('unsteady_since',now)
         if (not sample.get('probing') and self.display and not self.display.get('provisional')
                 and self.matches_clean_view(self.display,sample)):
+            self.display_recovered(now)
             self.show_display()
             self.check_pose(sample,self.view_cache,'structure' if self.app.overlay_style.get()=='结构' else 'original_clean')
             self.due = now+.06
@@ -1057,6 +1108,7 @@ class LiveController(base.LiveController):
             if self.display and self.overlay and self.overlay._visible:
                 since=self.display.setdefault('unsteady_since',now)
                 if now-since>.4:
+                    self.record_display_loss(sample,'view_lost')
                     self.note('view_lost','地图仍展开，正在寻找可对齐的固定墙线。',selected_floor=sample.get('selected_floor'))
                     self.overlay.hide();self.display=None
             self.pending = sample  # Bounded latest-positive slot, never an unbounded frame queue.
@@ -1110,6 +1162,7 @@ class LiveController(base.LiveController):
                             selected_floor=sample.get('selected_floor'), label=cached.get('label'),
                             summary=cached.get('summary'),possible_layouts=cached.get('possible_layouts'),
                             common_only=bool(cached.get('alternatives')),matrix=cached['matrix'].tolist(),
+                            pointer=sample.get('pointer'),
                             probe=cached['probe'].with_reference(sample['frame'],sample['signature']))
         cached['at'] = time.monotonic()
         handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
@@ -1382,12 +1435,10 @@ class LiveController(base.LiveController):
                                    shared_elevator_only=bool(result.get('shared_elevator_only')),possible_layouts=alternatives,
                                    shared_camera=bool(result.get('shared_camera')),camera_only=bool(result.get('camera_only')),pointer=sample.get('pointer'),
                                    provisional=bool(result.get('provisional')),
+                                   diagnostic_frame=sample.get('capture_frame',sample['frame']),diagnostic_scale=1.,
                                    handoff_origin=result.get('handoff_origin'),
                                    alternatives=result.get('common_floors'))
             self.view_cache['open_since']=getattr(self,'map_open_since',None)
-            if (sample.get('selected_floor')=='B1' and self.view_cache['unique_layout']
-                    and not self.view_cache['provisional']):
-                self.view_cache['diagnostic_frame'],self.view_cache['diagnostic_scale']=TransitionRecorder.picture(sample['frame'])
             handoffs=getattr(getattr(self,'matcher',None),'handoffs',None)
             if handoffs and not sample.get('manual'):
                 self.view_cache['player_hd']=handoffs.player_position(sample['frame'],result['floor'],result['matrix'])

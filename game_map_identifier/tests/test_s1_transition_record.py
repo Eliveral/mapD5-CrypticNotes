@@ -53,6 +53,27 @@ class TransitionEvidenceTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(data).hexdigest(),doc['files']['transition-0-target.png'])
             self.assertFalse(cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR).any())
 
+    def test_display_gap_slots_and_source_pixels_are_frozen(self):
+        pending=[]
+        class Deferred:
+            def __init__(self,target,**kwargs):pending.append(target)
+            def start(self):pass
+        with tempfile.TemporaryDirectory() as folder, patch('src.s1_transition_record.threading.Thread',Deferred):
+            rec=TransitionRecorder(Path(folder),slots=2)
+            source=dict(floor={'id':'s1_12_B2'},at=1.,matrix=np.eye(2,3),
+                        diagnostic_frame=np.zeros((20,30,3),np.uint8),diagnostic_scale=1.)
+            sample=dict(selected_floor='B2',frame=np.zeros((20,30,3),np.uint8),at=2.)
+            for index in range(3):
+                source['at']=index
+                source['diagnostic_frame'][:]=index
+                rec.observe(sample,source)
+                source['diagnostic_frame'][:]=255
+                pending.pop(0)()
+            self.assertEqual(len(list(rec.root.glob('*.json'))),2)
+            import cv2
+            pixels=cv2.imdecode(np.frombuffer((rec.root/'transition-0-source.png').read_bytes(),np.uint8),cv2.IMREAD_COLOR)
+            self.assertTrue((pixels==2).all())
+
     def test_frame_preserves_native_pixels_and_owns_memory(self):
         source=np.random.default_rng(17).integers(0,256,(1000,2000,3),dtype=np.uint8)
         image,scale=TransitionRecorder.picture(source)

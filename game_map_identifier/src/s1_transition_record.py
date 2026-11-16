@@ -6,8 +6,9 @@ import time
 import cv2
 
 class TransitionRecorder:
-    def __init__(self,root):
+    def __init__(self,root,slots=24):
         self.root=root/'transitions'
+        self.slots=slots
         self.busy=False
         self.key=None
         self.count=0
@@ -31,8 +32,9 @@ class TransitionRecorder:
         if sample.get('clear_mask') is not None:sample['clear_mask']=sample['clear_mask'].copy()
         source['matrix']=source['matrix'].copy()
         if source.get('player_hd') is not None:source['player_hd']=source['player_hd'].copy()
+        if source.get('diagnostic_frame') is not None:source['diagnostic_frame']=source['diagnostic_frame'].copy()
         self.busy=True;self.count+=1;self.saved_at=now
-        slot=self.slot;self.slot=(slot+1)%24
+        slot=self.slot;self.slot=(slot+1)%self.slots
         def save():
             try:
                 self.root.mkdir(parents=True,exist_ok=True)
