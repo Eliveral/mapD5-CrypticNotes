@@ -4,7 +4,7 @@
 
 ## 安装
 
-1. 从 [发布页](https://github.com/Eliveral/mapD5-CrypticNotes/releases/tag/v3.7.36-rc.1) 下载 `MapD5-Windows-x64.zip`，完整解压到一个文件夹，再双击 `MapD5.exe`。
+1. 从 [基础完整包发布页](https://github.com/Eliveral/mapD5-CrypticNotes/releases/tag/v3.7.35-rc.1) 下载 `MapD5-Windows-x64.zip`，完整解压后打开 `MapD5.exe`，再通过「程序更新」一键升级到最新测试版。3.7.36 本次公开小补丁。
 2. 首次选择「安装 S1 地图」。程序自带当前地图索引，从注明的上游固定版本下载约 18 MiB 的高清底图，并逐张校验。装好后可以离线使用。
 3. 回到游戏，按自己的地图键。新环境第一次启动会提示按下自己的地图键，保存后开始检测。已有键位自动沿用。可在「检测设置」点击当前游戏地图键重新录入键盘单键、修饰键组合或鼠标键，并调整底图不透明度。F9 隐藏或恢复覆盖，F10 停止检测。
 
